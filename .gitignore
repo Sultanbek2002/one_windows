@@ -1,0 +1,10 @@
+.vs/
+.idea/
+*.user
+*.suo
+*.log
+*.pfx
+*.p12
+.env
+.env.*
+!.env.example

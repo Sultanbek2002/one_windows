@@ -1,0 +1,6 @@
+**/bin/
+**/obj/
+releases/
+.dotnet/
+.downloads/
+dotnet-install.ps1
