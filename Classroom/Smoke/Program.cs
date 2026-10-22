@@ -62,13 +62,16 @@ try {
 
 // Test discovery on isolated test ports; no startup registry or real trust store is modified.
 using var teacherDiscovery = new Discovery(true, fingerprint, 49832, 49833);
-using var studentDiscovery = new Discovery(false, studentCert.GetCertHashString(HashAlgorithmName.SHA256), 49833, 49832);
 var found = new TaskCompletionSource<Beacon>(TaskCreationOptions.RunContinuationsAsynchronously);
 var teacherLoop = teacherDiscovery.Listen((_, _) => Task.CompletedTask, e => found.TrySetException(e));
+await teacherDiscovery.Announce(); // Student's UDP port is still closed: reproduce Windows ICMP reset.
+await Task.Delay(300);
+if (teacherLoop.IsCompleted) throw new Exception("Discovery stopped while no student was running");
+using var studentDiscovery = new Discovery(false, studentCert.GetCertHashString(HashAlgorithmName.SHA256), 49833, 49832);
 var studentLoop = studentDiscovery.Listen((beacon, _) => { found.TrySetResult(beacon); return Task.CompletedTask; }, e => found.TrySetException(e));
 await studentDiscovery.Announce();
 var discovered = await found.Task.WaitAsync(TimeSpan.FromSeconds(5));
 if (discovered.Pin != fingerprint || discovered.Role != "teacher") throw new Exception("Wrong discovery response");
 teacherDiscovery.Dispose(); studentDiscovery.Dispose();
 await Task.WhenAll(teacherLoop, studentLoop);
-Console.WriteLine("PASS: UDP discovery and teacher response on loopback.");
+Console.WriteLine("PASS: UDP discovery survives absent student and discovers it when started later.");

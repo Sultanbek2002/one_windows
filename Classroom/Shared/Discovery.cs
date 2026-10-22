@@ -17,17 +17,28 @@ sealed class Discovery : IDisposable
         self = new("classroom-v2", teacher ? "teacher" : "student", Environment.MachineName, pin);
         remotePort = targetPort != 0 ? targetPort : teacher ? StudentPort : TeacherPort;
         udp = new UdpClient(new IPEndPoint(IPAddress.Any, localPort != 0 ? localPort : teacher ? TeacherPort : StudentPort)) { EnableBroadcast = true };
+        // A discovery probe may reach a PC where Student is not running yet.
+        // Windows otherwise surfaces its ICMP Port Unreachable as receive error 10054.
+        if (OperatingSystem.IsWindows()) {
+            try { udp.Client.IOControl(unchecked((int)0x9800000C), new byte[4], null); } // SIO_UDP_CONNRESET = false
+            catch { udp.Dispose(); throw; }
+        }
     }
     public async Task Listen(Func<Beacon, IPAddress, Task> receive, Action<Exception> failure)
     {
         try {
             while (!stop.IsCancellationRequested) {
-                var packet = await udp.ReceiveAsync(stop.Token);
+                UdpReceiveResult packet;
+                try { packet = await udp.ReceiveAsync(stop.Token); }
+                catch (SocketException e) when (e.SocketErrorCode is SocketError.ConnectionReset or SocketError.ConnectionRefused) { continue; }
                 if (packet.Buffer.Length > 2048) continue;
                 Beacon? beacon;
                 try { beacon = JsonSerializer.Deserialize<Beacon>(packet.Buffer); } catch (JsonException) { continue; }
                 if (beacon?.Protocol != self.Protocol || beacon.Role is not ("teacher" or "student") || beacon.Role == self.Role || beacon.Pin?.Length != 64 || !beacon.Pin.All(Uri.IsHexDigit) || string.IsNullOrWhiteSpace(beacon.Name) || beacon.Name.Length > 100) continue;
-                if (self.Role == "teacher") await udp.SendAsync(JsonSerializer.SerializeToUtf8Bytes(self), packet.RemoteEndPoint);
+                if (self.Role == "teacher") {
+                    try { await udp.SendAsync(JsonSerializer.SerializeToUtf8Bytes(self), packet.RemoteEndPoint); }
+                    catch (SocketException e) when (e.SocketErrorCode is SocketError.ConnectionReset or SocketError.ConnectionRefused) { continue; }
+                }
                 await receive(beacon, packet.RemoteEndPoint.Address);
             }
         } catch (OperationCanceledException) { } catch (ObjectDisposedException) { }
