@@ -33,7 +33,7 @@ try
     using var client = new Peer(tcp, ssl);
     await client.Send(new("hello-v2", "Ученик"));
     if ((await client.Read())?.Type != "accepted") throw new Exception("Handshake rejected");
-    await client.Send(new("frame", new string('a', 300000), 1920, 1080));
+    if (!await client.TrySendFrame(Peer.Encode(new("frame", new string('a', 300000), 1920, 1080)))) throw new Exception("Idle video channel rejected a frame");
     if ((await client.Read()) != new Packet("control", "no")) throw new Exception("Control revocation corrupted");
     client.Dispose(); await receive.WaitAsync(TimeSpan.FromSeconds(15));
     Console.WriteLine("PASS: mutual TLS with pinned teacher and student certificates, code-free Unicode handshake, large frame, control revocation packet, disconnect.");
@@ -75,3 +75,18 @@ if (discovered.Pin != fingerprint || discovered.Role != "teacher") throw new Exc
 teacherDiscovery.Dispose(); studentDiscovery.Dispose();
 await Task.WhenAll(teacherLoop, studentLoop);
 Console.WriteLine("PASS: UDP discovery survives absent student and discovers it when started later.");
+
+using var slide = new Bitmap(2560, 1440);
+using (var graphics = Graphics.FromImage(slide)) { graphics.Clear(Color.White); using var font = new Font("Segoe UI", 22); graphics.DrawString("Demonstration: text 123 ABC", font, Brushes.Black, 40, 60); }
+foreach (var profile in VideoProfile.All) {
+    var wire = ScreenCapture.Encode(slide, profile);
+    var packet = System.Text.Json.JsonSerializer.Deserialize<Packet>(System.Text.Encoding.UTF8.GetString(wire))!;
+    using var buffer = new MemoryStream(Convert.FromBase64String(packet.Data)); using var image = Image.FromStream(buffer);
+    var expectedWidth = Math.Min(slide.Width, profile.MaxWidth);
+    if (image.Width != expectedWidth || image.Height != expectedWidth * 1440 / 2560 || packet.X != 2560 || packet.Y != 1440) throw new Exception("Frame dimensions or source coordinates changed");
+}
+using var small = new Bitmap(640, 480);
+var smallPacket = System.Text.Json.JsonSerializer.Deserialize<Packet>(System.Text.Encoding.UTF8.GetString(ScreenCapture.Encode(small, VideoProfile.All[1])))!;
+using var smallBytes = new MemoryStream(Convert.FromBase64String(smallPacket.Data)); using var smallImage = Image.FromStream(smallBytes);
+if (smallImage.Width != 640 || smallImage.Height != 480) throw new Exception("Smaller monitor was upscaled");
+Console.WriteLine("PASS: JPEG video profiles preserve aspect ratio, source coordinates and native resolution of smaller monitors.");

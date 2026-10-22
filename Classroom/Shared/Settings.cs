@@ -4,6 +4,7 @@ sealed class Settings
 {
     public Dictionary<string, string> Trusted { get; set; } = [];
     public bool AutoControl { get; set; } = true;
+    public int VideoMode { get; set; } = 1;
     public static string DirectoryPath => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Classroom");
     public static string PathFor(string role) => Path.Combine(DirectoryPath, role + ".json");
     public static Settings Load(string role) => File.Exists(PathFor(role)) ? JsonSerializer.Deserialize<Settings>(File.ReadAllText(PathFor(role))) ?? new() : new();

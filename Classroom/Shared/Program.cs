@@ -47,6 +47,11 @@ sealed class MainWindow : Form
     readonly RemoteScreen screen = new() { Dock = DockStyle.Fill, SizeMode = PictureBoxSizeMode.Zoom, BackColor = Color.FromArgb(24, 31, 42), TabStop = true };
     readonly List<Peer> peers = [];
     readonly System.Windows.Forms.Timer timer = new() { Interval = 700 };
+    readonly ComboBox videoQuality = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 300 };
+    readonly Label videoInfo = new() { Dock = DockStyle.Bottom, Height = 24, Text = "Видео: ожидание кадров", AutoEllipsis = true };
+    readonly System.Diagnostics.Stopwatch videoClock = System.Diagnostics.Stopwatch.StartNew();
+    int receivedFrames;
+    long lastHeartbeat;
     TcpListener? listener;
     X509Certificate2? certificate;
     Peer? connection;
@@ -69,10 +74,27 @@ sealed class MainWindow : Form
         Text = IsTeacher ? "Класс — Учитель (прототип)" : "Класс — Ученик (прототип)";
         Width = 1150; Height = 760; Font = new("Segoe UI", 10);
         var toolbar = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 120, Padding = new(10), AutoScroll = true };
+        if (!IsTeacher) {
+            var fullscreen = new Button { Text = "На весь экран (выход: Esc)", AutoSize = true };
+            var expanded = false; var previousBounds = Bounds; var previousState = WindowState;
+            void ToggleFullscreen() {
+                expanded = !expanded;
+                if (expanded) { previousBounds = Bounds; previousState = WindowState; WindowState = FormWindowState.Normal; FormBorderStyle = FormBorderStyle.None; WindowState = FormWindowState.Maximized; }
+                else { WindowState = FormWindowState.Normal; FormBorderStyle = FormBorderStyle.Sizable; Bounds = previousBounds; WindowState = previousState; }
+                toolbar.Visible = !expanded; status.Visible = !expanded; videoInfo.Visible = !expanded;
+            }
+            fullscreen.Click += (_, _) => ToggleFullscreen();
+            screen.DoubleClick += (_, _) => ToggleFullscreen();
+            KeyPreview = true;
+            KeyDown += (_, e) => { if (expanded && e.KeyCode == Keys.Escape) { e.SuppressKeyPress = true; ToggleFullscreen(); } };
+            toolbar.Controls.Add(fullscreen);
+        }
         toolbar.Controls.AddRange([new Label { Text = "Автопоиск компьютеров в локальной сети", AutoSize = true }, connect, stop, forget, details]);
-        if (IsTeacher) { toolbar.Controls.Add(broadcast); toolbar.Controls.Add(request); }
+        if (IsTeacher) { toolbar.Controls.Add(broadcast); toolbar.Controls.Add(request); videoQuality.Items.AddRange(VideoProfile.All); videoQuality.SelectedIndex = 1; toolbar.Controls.Add(videoQuality); }
         else { toolbar.Controls.Add(control); toolbar.Controls.Add(autoControl); toolbar.Controls.Add(startup); }
-        Controls.Add(screen); if (IsTeacher) Controls.Add(students); Controls.Add(toolbar); Controls.Add(status);
+        Controls.Add(screen); if (IsTeacher) Controls.Add(students); Controls.Add(toolbar); Controls.Add(videoInfo); Controls.Add(status);
+        videoQuality.SelectedIndexChanged += (_, _) => { settings.VideoMode = videoQuality.SelectedIndex; timer.Interval = 1000 / VideoProfile.All[videoQuality.SelectedIndex].FramesPerSecond; SaveSettings(); };
+        if (IsTeacher) timer.Interval = 1000 / VideoProfile.All[1].FramesPerSecond;
         connect.Click += async (_, _) => { paused = false; declined.Clear(); await StartAutomatic(); };
         stop.Click += (_, _) => { paused = true; Disconnect(); };
         request.Click += async (_, _) => { if (students.SelectedItem is Peer p) { if (p.Control) { screen.Focus(); status.Text = "Управление: " + p.Name + ". Щёлкайте по экрану и вводите текст."; } else await SafeSend(p, new("control-request")); } };
@@ -158,8 +180,11 @@ sealed class MainWindow : Form
             switch (m.Type) {
                 case "frame":
                     if (!IsTeacher || students.SelectedItem == p) {
-                        using var ms = new MemoryStream(Convert.FromBase64String(m.Data)); using var original = Image.FromStream(ms);
-                        var image = new Bitmap(original); var old = screen.Image; screen.Image = image; old?.Dispose();
+                        var image = await Task.Run(() => { using var ms = new MemoryStream(Convert.FromBase64String(m.Data)); using var original = Image.FromStream(ms); return new Bitmap(original); });
+                        if (closing || paused || (IsTeacher ? students.SelectedItem != p : connection != p)) { image.Dispose(); break; }
+                        var old = screen.Image; screen.Image = image; old?.Dispose();
+                        receivedFrames++;
+                        if (videoClock.ElapsedMilliseconds >= 1000) { videoInfo.Text = $"Приём: {image.Width} × {image.Height} · {receivedFrames * 1000d / videoClock.ElapsedMilliseconds:F1} кадров/с"; receivedFrames = 0; videoClock.Restart(); }
                     } break;
                 case "broadcast-stop": screen.Image?.Dispose(); screen.Image = null; break;
                 case "control-request":
@@ -189,20 +214,21 @@ sealed class MainWindow : Form
         if (targets.Length == 0) return;
         sending = true;
         try {
-            Packet frame;
-            if (IsTeacher && !broadcast.Checked) frame = new("ping");
+            if (IsTeacher && !broadcast.Checked) {
+                if (Environment.TickCount64 - lastHeartbeat >= 2000) { lastHeartbeat = Environment.TickCount64; await Task.WhenAll(targets.Select(p => SafeSend(p, new("ping")))); }
+            }
             else {
                 var bounds = Screen.PrimaryScreen!.Bounds;
-                using var bitmap = new Bitmap(bounds.Width, bounds.Height);
-                using (var g = Graphics.FromImage(bitmap)) g.CopyFromScreen(bounds.Location, Point.Empty, bounds.Size);
-                using var scaled = new Bitmap(bitmap, new Size(1024, Math.Max(1, bounds.Height * 1024 / bounds.Width)));
-                using var ms = new MemoryStream(); scaled.Save(ms, ImageFormat.Jpeg);
-                frame = new("frame", Convert.ToBase64String(ms.ToArray()), bounds.Width, bounds.Height);
+                var profile = IsTeacher ? VideoProfile.All[videoQuality.SelectedIndex] : new VideoProfile("Просмотр ученика", 1024, 2, 80);
+                var bytes = await Task.Run(() => ScreenCapture.Capture(bounds, profile));
+                if (closing || paused || (IsTeacher && !broadcast.Checked)) return;
+                foreach (var p in targets) _ = SendVideo(p, bytes);
+                if (IsTeacher) videoInfo.Text = $"Демонстрация: {profile.Name} · кадр {bytes.Length / 1024} КБ · получателей {targets.Length}";
             }
-            await Task.WhenAll(targets.Select(p => SafeSend(p, frame)));
         } catch (Exception e) { status.Text = "Захват экрана: " + e.Message; }
         finally { sending = false; }
     }
+    async Task SendVideo(Peer p, byte[] bytes) { try { await p.TrySendFrame(bytes); } catch (Exception e) { if (!closing && !paused) Report("Передача видео: " + Explain(e)); p.Dispose(); } }
     void Disconnect()
     {
         listener?.Stop(); listener = null;
@@ -217,6 +243,7 @@ sealed class MainWindow : Form
         try {
             if (discovery != null) { await Search(); return; }
             settings = Settings.Load(Role);
+            if (IsTeacher) videoQuality.SelectedIndex = Math.Clamp(settings.VideoMode, 0, VideoProfile.All.Length - 1);
             autoControl.Checked = settings.AutoControl;
             certificate ??= ClassCertificate.LoadIdentity(Role);
             if (IsTeacher) {

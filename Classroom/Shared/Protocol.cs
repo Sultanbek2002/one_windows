@@ -13,12 +13,20 @@ sealed class Peer : IDisposable
     readonly SemaphoreSlim gate = new(1);
     public string Name = "Ученик";
     public bool Control { get; set; }
-    public Peer(TcpClient c, SslStream s) { client = c; stream = s; reader = new(s, Encoding.UTF8, false, 65536, true); }
+    public Peer(TcpClient c, SslStream s) { client = c; client.NoDelay = true; stream = s; reader = new(s, Encoding.UTF8, false, 65536, true); }
+    public static byte[] Encode(Packet p) => Encoding.UTF8.GetBytes(JsonSerializer.Serialize(p) + "\n");
     public async Task Send(Packet p)
     {
-        var bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(p) + "\n");
+        var bytes = Encode(p);
         await gate.WaitAsync();
         try { await stream.WriteAsync(bytes).AsTask().WaitAsync(TimeSpan.FromSeconds(5)); }
+        finally { gate.Release(); }
+    }
+    // One in-flight frame per peer. Slow recipients skip new frames rather than queue them.
+    public async Task<bool> TrySendFrame(byte[] bytes)
+    {
+        if (!await gate.WaitAsync(0)) return false;
+        try { await stream.WriteAsync(bytes).AsTask().WaitAsync(TimeSpan.FromSeconds(5)); return true; }
         finally { gate.Release(); }
     }
     public async Task<Packet?> Read(int timeoutSeconds = 30) { var line = await reader.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(timeoutSeconds)); return line == null ? null : JsonSerializer.Deserialize<Packet>(line); }
