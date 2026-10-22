@@ -2,12 +2,13 @@ using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 
 namespace Classroom;
-record VideoProfile(string Name, int MaxWidth, int FramesPerSecond, long JpegQuality)
+record VideoProfile(string Name, int MaxWidth, int FramesPerSecond, long JpegQuality, bool Lossless = false)
 {
     public static readonly VideoProfile[] All = [
         new("Экономный · 720p / до 10 кадров/с", 1280, 10, 78),
         new("Чёткий · 1080p / до 15 кадров/с", 1920, 15, 90),
-        new("Текст · до 4K / до 8 кадров/с", 3840, 8, 95)
+        new("Текст · до 4K / до 8 кадров/с", 3840, 8, 95),
+        new("Максимум · PNG без потерь / до 5 кадров/с", int.MaxValue, 5, 100, true)
     ];
     public override string ToString() => Name;
 }
@@ -22,6 +23,10 @@ static class ScreenCapture
     }
     public static byte[] Encode(Bitmap source, VideoProfile profile)
     {
+        if (profile.Lossless) {
+            using var png = new MemoryStream(); source.Save(png, ImageFormat.Png);
+            return Peer.Encode(new("frame", Convert.ToBase64String(png.ToArray()), source.Width, source.Height));
+        }
         // Never upscale a smaller monitor: that would add bandwidth without adding detail.
         var scale = Math.Min(1d, (double)profile.MaxWidth / source.Width);
         var size = new Size(Math.Max(1, (int)Math.Round(source.Width * scale)), Math.Max(1, (int)Math.Round(source.Height * scale)));

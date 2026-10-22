@@ -90,3 +90,9 @@ var smallPacket = System.Text.Json.JsonSerializer.Deserialize<Packet>(System.Tex
 using var smallBytes = new MemoryStream(Convert.FromBase64String(smallPacket.Data)); using var smallImage = Image.FromStream(smallBytes);
 if (smallImage.Width != 640 || smallImage.Height != 480) throw new Exception("Smaller monitor was upscaled");
 Console.WriteLine("PASS: JPEG video profiles preserve aspect ratio, source coordinates and native resolution of smaller monitors.");
+using var pixels = new Bitmap(73, 51);
+for (var y = 0; y < pixels.Height; y++) for (var x = 0; x < pixels.Width; x++) pixels.SetPixel(x, y, Color.FromArgb((x * 31 + y * 7) % 256, (x * 13 + y * 47) % 256, (x * 83 + y * 19) % 256));
+var losslessPacket = System.Text.Json.JsonSerializer.Deserialize<Packet>(System.Text.Encoding.UTF8.GetString(ScreenCapture.Encode(pixels, VideoProfile.All.Last())))!;
+using var pngBuffer = new MemoryStream(Convert.FromBase64String(losslessPacket.Data)); using var restored = new Bitmap(pngBuffer);
+for (var y = 0; y < pixels.Height; y++) for (var x = 0; x < pixels.Width; x++) if (pixels.GetPixel(x, y).ToArgb() != restored.GetPixel(x, y).ToArgb()) throw new Exception("Lossless mode changed a pixel");
+Console.WriteLine("PASS: PNG maximum-quality mode preserves every source pixel exactly.");

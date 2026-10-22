@@ -45,6 +45,7 @@ sealed class MainWindow : Form
     readonly TextBox status = new() { Dock = DockStyle.Bottom, Height = 76, Text = "Готово", Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical };
     readonly ListBox students = new() { Dock = DockStyle.Left, Width = 180 };
     readonly RemoteScreen screen = new() { Dock = DockStyle.Fill, SizeMode = PictureBoxSizeMode.Zoom, BackColor = Color.FromArgb(24, 31, 42), TabStop = true };
+    readonly Panel screenArea = new() { Dock = DockStyle.Fill, AutoScroll = true, BackColor = Color.FromArgb(24, 31, 42) };
     readonly List<Peer> peers = [];
     readonly System.Windows.Forms.Timer timer = new() { Interval = 700 };
     readonly ComboBox videoQuality = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 300 };
@@ -75,6 +76,9 @@ sealed class MainWindow : Form
         Width = 1150; Height = 760; Font = new("Segoe UI", 10);
         var toolbar = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 120, Padding = new(10), AutoScroll = true };
         if (!IsTeacher) {
+            var nativeSize = new CheckBox { Text = "Масштаб 1:1 (прокрутка)", AutoSize = true };
+            nativeSize.CheckedChanged += (_, _) => { screen.Dock = nativeSize.Checked ? DockStyle.None : DockStyle.Fill; screen.SizeMode = nativeSize.Checked ? PictureBoxSizeMode.AutoSize : PictureBoxSizeMode.Zoom; };
+            toolbar.Controls.Add(nativeSize);
             var fullscreen = new Button { Text = "На весь экран (выход: Esc)", AutoSize = true };
             var expanded = false; var previousBounds = Bounds; var previousState = WindowState;
             void ToggleFullscreen() {
@@ -92,7 +96,7 @@ sealed class MainWindow : Form
         toolbar.Controls.AddRange([new Label { Text = "Автопоиск компьютеров в локальной сети", AutoSize = true }, connect, stop, forget, details]);
         if (IsTeacher) { toolbar.Controls.Add(broadcast); toolbar.Controls.Add(request); videoQuality.Items.AddRange(VideoProfile.All); videoQuality.SelectedIndex = 1; toolbar.Controls.Add(videoQuality); }
         else { toolbar.Controls.Add(control); toolbar.Controls.Add(autoControl); toolbar.Controls.Add(startup); }
-        Controls.Add(screen); if (IsTeacher) Controls.Add(students); Controls.Add(toolbar); Controls.Add(videoInfo); Controls.Add(status);
+        screenArea.Controls.Add(screen); Controls.Add(screenArea); if (IsTeacher) Controls.Add(students); Controls.Add(toolbar); Controls.Add(videoInfo); Controls.Add(status);
         videoQuality.SelectedIndexChanged += (_, _) => { settings.VideoMode = videoQuality.SelectedIndex; timer.Interval = 1000 / VideoProfile.All[videoQuality.SelectedIndex].FramesPerSecond; SaveSettings(); };
         if (IsTeacher) timer.Interval = 1000 / VideoProfile.All[1].FramesPerSecond;
         connect.Click += async (_, _) => { paused = false; declined.Clear(); await StartAutomatic(); };
