@@ -11,8 +11,9 @@ using System.Runtime.InteropServices;
 namespace Classroom;
 static class Program
 {
-    [STAThread] static void Main() {
+    [STAThread] static void Main(string[] args) {
         ApplicationConfiguration.Initialize();
+        if (args.Length == 2 && args[0] == "--design-preview") { Application.Run(new MainWindow(args[1])); return; }
 #if TEACHER
         const string role = "Teacher";
 #else
@@ -76,7 +77,7 @@ sealed class MainWindow : Form
     Discovery? discovery;
     bool paused, connecting, announcing;
     string Role => IsTeacher ? "Teacher" : "Student";
-    public MainWindow()
+    public MainWindow(string? previewPath = null)
     {
         Text = IsTeacher ? "Класс — Учитель (прототип)" : "Класс — Ученик (прототип)";
         Width = 1150; Height = 760; Font = new("Segoe UI", 10);
@@ -132,7 +133,7 @@ sealed class MainWindow : Form
         autoControl.CheckedChanged += (_, _) => { settings.AutoControl = autoControl.Checked; SaveSettings(); if (!autoControl.Checked) control.Checked = false; };
         startup.Click += (_, _) => ToggleStartup();
         details.Click += (_, _) => MessageBox.Show(this, "Имя: " + Environment.MachineName + "\nСертификат: " + certificate?.GetCertHashString(HashAlgorithmName.SHA256) + "\nЖурнал: " + Path.Combine(Settings.DirectoryPath, Role + ".log"), "Сведения для первого подтверждения");
-        forget.Click += (_, _) => { if (MessageBox.Show(this, "Удалить доверенные компьютеры? При следующем подключении потребуется новое подтверждение.", "Сброс доверия", MessageBoxButtons.YesNo) != DialogResult.Yes) return; paused = true; Disconnect(); settings.Trusted.Clear(); declined.Clear(); SaveSettings(); Report("Доверие сброшено. Нажмите «Возобновить поиск»."); };
+        forget.Click += (_, _) => { if (MessageBox.Show(this, "Удалить доверенные компьютеры? При следующем подключении потребуется новое подтверждение.", "Сброс доверия", MessageBoxButtons.YesNo) != DialogResult.Yes) return; paused = true; Disconnect(); settings.Trusted.Clear(); declined.Clear(); SaveSettings(); Report("Доверие сброшено. Нажмите «Найти снова»."); };
         control.CheckedChanged += async (_, _) => { if (!control.Checked) { ReleaseKeys(); UnlockStudent("Управление отключено"); } if (connection != null) await SafeSend(connection, new("control", control.Checked ? "yes" : "no")); };
         broadcast.CheckedChanged += async (_, _) => { if (!broadcast.Checked) foreach (var p in peers.ToArray()) await SafeSend(p, new("broadcast-stop")); };
         students.SelectedIndexChanged += async (_, _) => { screen.Image?.Dispose(); screen.Image = null; foreach (var p in peers.Where(p => p.Control).ToArray()) await SafeSend(p, new("release-keys")); };
@@ -156,7 +157,13 @@ sealed class MainWindow : Form
         FormClosing += (_, e) => { if (!IsTeacher && !closing && e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; tray.Visible = true; Hide(); } };
         FormClosed += (_, _) => { closing = true; timer.Stop(); searchTimer.Stop(); lockTimer.Stop(); Disconnect(); messages?.Dispose(); blocker.Dispose(); certificate?.Dispose(); tray.Dispose(); };
         searchTimer.Tick += async (_, _) => await Search();
-        Shown += async (_, _) => await StartAutomatic();
+        Design.ApplyMain(this, IsTeacher, toolbar, students, screenArea, status, videoInfo, broadcast, videoQuality);
+        if (previewPath == null) Shown += async (_, _) => await StartAutomatic();
+        else {
+            timer.Stop(); lockTimer.Stop();
+            if (IsTeacher) students.Items.AddRange(["CLASSROOM-PC01", "CLASSROOM-PC02", "CLASSROOM-PC03"]);
+            Shown += (_, _) => BeginInvoke((Action)(() => { using var bitmap = new Bitmap(Width, Height); DrawToBitmap(bitmap, new Rectangle(Point.Empty, bitmap.Size)); bitmap.Save(previewPath); closing = true; Close(); }));
+        }
     }
     async Task Connect(string expected)
     {

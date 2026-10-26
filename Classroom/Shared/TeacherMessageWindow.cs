@@ -17,6 +17,12 @@ sealed class TeacherMessageWindow : Form
         Controls.Add(body); Controls.Add(history); Controls.Add(buttons);
         history.SelectedIndexChanged += (_, _) => { body.Text = (history.SelectedItem as Item)?.Text ?? ""; feedback.Text = ""; };
         FormClosing += (_, e) => { if (e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; Hide(); } };
+        Design.Dialog(this); Width = 780; Height = 500;
+        body.BorderStyle = BorderStyle.None; body.BackColor = Color.White; body.ForeColor = Design.Ink;
+        history.BorderStyle = BorderStyle.None; history.BackColor = Design.Surface; history.ForeColor = Design.Muted; history.ItemHeight = 32; history.Font = new Font("Segoe UI", 11);
+        buttons.Height = 56; buttons.Padding = new Padding(0, 10, 0, 0); Design.Button(copy, true); Design.Button(close);
+        feedback.ForeColor = Design.Muted;
+        Controls.Add(new Label { Text = "Сообщения учителя", Dock = DockStyle.Top, Height = 58, ForeColor = Design.Ink, Font = new Font("Segoe UI", 20, FontStyle.Bold) });
     }
     public void Receive(string text)
     {
@@ -34,6 +40,10 @@ sealed class TeacherMessageWindow : Form
         var cancel = new Button { Text = "Отмена", DialogResult = DialogResult.Cancel, AutoSize = true };
         send.Click += (_, _) => { if (string.IsNullOrWhiteSpace(input.Text)) return; if (link && !ClassActions.WebAddress(input.Text, out _)) { MessageBox.Show(dialog, "Нужен адрес http:// или https:// без логина и пароля."); return; } dialog.DialogResult = DialogResult.OK; };
         actions.Controls.AddRange([send, cancel]); dialog.Controls.Add(input); dialog.Controls.Add(hint); dialog.Controls.Add(actions); dialog.CancelButton = cancel;
+        Design.Dialog(dialog); dialog.Width = 720; dialog.Height = link ? 290 : 450;
+        hint.Height = 72; hint.ForeColor = Design.Muted; input.BorderStyle = BorderStyle.FixedSingle; input.Font = new Font("Segoe UI", 12);
+        input.PlaceholderText = link ? "https://example.com/lesson" : "Напишите задание или объявление для класса…";
+        actions.Height = 56; actions.Padding = new Padding(0, 10, 0, 0); Design.Button(send, true); Design.Button(cancel);
         return dialog.ShowDialog(owner) == DialogResult.OK ? input.Text : null;
     }
 }
