@@ -8,6 +8,7 @@ using System.Security.Cryptography.X509Certificates;
 using var cert = ClassCertificate.Create();
 using var studentCert = ClassCertificate.Create();
 var fingerprint = cert.GetCertHashString(HashAlgorithmName.SHA256);
+var actionSamples = new[] { new ClassAction(Guid.NewGuid().ToString(), "Задание №1\nСкопируйте этот текст: Привет!"), new ClassAction(Guid.NewGuid().ToString(), "https://example.com/lesson?q=1&lang=ru") };
 var server = new TcpListener(IPAddress.Loopback, 0);
 server.Start();
 try
@@ -22,6 +23,13 @@ try
         var hello = await peer.Read();
         if (hello != new Packet("hello-v2", "Ученик")) throw new Exception("Handshake payload corrupted");
         await peer.Send(new("accepted"));
+        for (var i = 0; i < actionSamples.Length; i++) {
+            var kind = i == 0 ? "teacher-message" : "open-url";
+            await peer.Send(new(kind, System.Text.Json.JsonSerializer.Serialize(actionSamples[i])));
+            var ack = await peer.Read();
+            var receipt = ack?.Type == "action-result" ? System.Text.Json.JsonSerializer.Deserialize<ActionReceipt>(ack.Data) : null;
+            if (receipt?.Id != actionSamples[i].Id || receipt.Kind != kind || !receipt.Success) throw new Exception("Message/link delivery acknowledgement corrupted");
+        }
         var frame = await peer.Read();
         if (frame?.Type != "frame" || frame.Data.Length != 300000 || frame.X != 1920) throw new Exception("Large frame corrupted");
         await peer.Send(new("control", "no"));
@@ -33,10 +41,18 @@ try
     using var client = new Peer(tcp, ssl);
     await client.Send(new("hello-v2", "Ученик"));
     if ((await client.Read())?.Type != "accepted") throw new Exception("Handshake rejected");
+    for (var i = 0; i < actionSamples.Length; i++) {
+        var packet = await client.Read(); var kind = i == 0 ? "teacher-message" : "open-url";
+        var action = packet?.Type == kind ? System.Text.Json.JsonSerializer.Deserialize<ClassAction>(packet.Data) : null;
+        if (!ClassActions.Valid(action) || action != actionSamples[i]) throw new Exception("Teacher message/link text corrupted");
+        if (i == 1 && !ClassActions.WebAddress(action!.Text, out _)) throw new Exception("Valid web URL rejected");
+        await client.Send(new("action-result", System.Text.Json.JsonSerializer.Serialize(new ActionReceipt(action!.Id, kind, true, "Simulated receiver accepted payload"))));
+    }
     if (!await client.TrySendFrame(Peer.Encode(new("frame", new string('a', 300000), 1920, 1080)))) throw new Exception("Idle video channel rejected a frame");
     if ((await client.Read()) != new Packet("control", "no")) throw new Exception("Control revocation corrupted");
     client.Dispose(); await receive.WaitAsync(TimeSpan.FromSeconds(15));
     Console.WriteLine("PASS: mutual TLS with pinned teacher and student certificates, code-free Unicode handshake, large frame, control revocation packet, disconnect.");
+    Console.WriteLine("PASS: Unicode/multiline teacher message, web link and correlated acknowledgements over TLS (no UI/browser actions).");
 }
 finally { server.Stop(); }
 
@@ -105,3 +121,7 @@ if (lockState.TryRenew(firstLock, 17000)) throw new Exception("Cancelled lock re
 if (!lockState.TryRenew(Guid.NewGuid().ToString(), 18000)) throw new Exception("A new explicit lock could not be activated");
 lockState.Release();
 Console.WriteLine("PASS: screen-lock expiry, heartbeat renewal, emergency/unlock cancellation and explicit re-lock.");
+foreach (var invalid in new[] { "file:///C:/Windows/notepad.exe", "javascript:alert(1)", "data:text/html,hello", "shell:startup", "ftp://example.com", "https://user:pass@example.com", "https://example.com/\r\nhello", "not a url" }) if (ClassActions.WebAddress(invalid, out _)) throw new Exception("Unsafe or malformed URL accepted: " + invalid);
+foreach (var valid in new[] { "https://example.com/lesson?q=hello%20world", "http://192.168.0.79:8080/" }) if (!ClassActions.WebAddress(valid, out _)) throw new Exception("Valid web URL rejected");
+if (ClassActions.Valid(new ClassAction(Guid.NewGuid().ToString(), new string('x', 20001))) || ClassActions.Valid(new ClassAction(Guid.NewGuid().ToString(), "  "))) throw new Exception("Invalid teacher message accepted");
+Console.WriteLine("PASS: web URL scheme/credential/control-character validation and message length limits.");

@@ -14,6 +14,7 @@ sealed class Peer : IDisposable
     public string Name = "Ученик";
     public bool Control { get; set; }
     public bool SupportsScreenLock { get; set; }
+    public bool SupportsClassActions { get; set; }
     public bool LockRequested { get; set; }
     public string LockToken { get; set; } = "";
     public Peer(TcpClient c, SslStream s) { client = c; client.NoDelay = true; stream = s; reader = new(s, Encoding.UTF8, false, 65536, true); }

@@ -63,6 +63,8 @@ sealed class MainWindow : Form
     readonly System.Windows.Forms.Timer lockTimer = new() { Interval = 500 };
     readonly ScreenLockState screenLock = new();
     bool lockAll;
+    TeacherMessageWindow? messages;
+    readonly Dictionary<(Peer, string), TaskCompletionSource<ActionReceipt>> pendingActions = [];
     readonly CheckBox autoControl = new() { Text = "Всегда разрешать управление доверенному учителю", AutoSize = true };
     readonly Button startup = new() { Text = "Включить автозапуск", AutoSize = true };
     readonly Button forget = new() { Text = "Сбросить доверие", AutoSize = true };
@@ -101,6 +103,17 @@ sealed class MainWindow : Form
         if (IsTeacher) { toolbar.Controls.Add(broadcast); toolbar.Controls.Add(request); videoQuality.Items.AddRange(VideoProfile.All); videoQuality.SelectedIndex = 1; toolbar.Controls.Add(videoQuality); }
         else { toolbar.Controls.Add(control); toolbar.Controls.Add(autoControl); toolbar.Controls.Add(startup); }
         if (IsTeacher) {
+            var message = new Button { Text = "Сообщение всем", AutoSize = true };
+            var link = new Button { Text = "Открыть ссылку у всех", AutoSize = true };
+            toolbar.Controls.AddRange([message, link]);
+            async Task ComposeAndSend(bool isLink) {
+                if (peers.Count == 0) { Report("Нет подключённых учеников."); return; }
+                message.Enabled = link.Enabled = false;
+                try { var text = TeacherMessageWindow.Compose(this, isLink); if (text != null) await SendClassAction(isLink ? "open-url" : "teacher-message", text); }
+                finally { message.Enabled = link.Enabled = true; }
+            }
+            message.Click += async (_, _) => await ComposeAndSend(false);
+            link.Click += async (_, _) => await ComposeAndSend(true);
             var block = new Button { Text = "Заблокировать экраны", AutoSize = true };
             var unblock = new Button { Text = "Разблокировать все", AutoSize = true };
             toolbar.Controls.AddRange([block, unblock]);
@@ -141,7 +154,7 @@ sealed class MainWindow : Form
         menu.Items.Add("Выход", null, (_, _) => { closing = true; Close(); }); tray.ContextMenuStrip = menu;
         Resize += (_, _) => { if (!IsTeacher && WindowState == FormWindowState.Minimized) { tray.Visible = true; Hide(); } };
         FormClosing += (_, e) => { if (!IsTeacher && !closing && e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; tray.Visible = true; Hide(); } };
-        FormClosed += (_, _) => { closing = true; timer.Stop(); searchTimer.Stop(); lockTimer.Stop(); Disconnect(); blocker.Dispose(); certificate?.Dispose(); tray.Dispose(); };
+        FormClosed += (_, _) => { closing = true; timer.Stop(); searchTimer.Stop(); lockTimer.Stop(); Disconnect(); messages?.Dispose(); blocker.Dispose(); certificate?.Dispose(); tray.Dispose(); };
         searchTimer.Tick += async (_, _) => await Search();
         Shown += async (_, _) => await StartAutomatic();
     }
@@ -164,6 +177,7 @@ sealed class MainWindow : Form
                     p.Name = settings.Trusted[expected]; connection = p; control.Checked = autoControl.Checked;
                     await p.Send(new("control", control.Checked ? "yes" : "no"));
                     await p.Send(new("capabilities", "screen-lock-v1"));
+                    await p.Send(new("capabilities", "message-links-v1"));
                     Report("Подключено к " + settings.Trusted[expected] + ". Экран виден учителю. " + (control.Checked ? "Управление разрешено." : "Управление выключено."));
                     _ = ReadLoop(p);
                 } catch { tcp.Dispose(); throw; }
@@ -197,7 +211,16 @@ sealed class MainWindow : Form
         try { while (!closing) {
             var m = await p.Read(); if (m == null) { Report(p.Name + ": другая сторона закрыла соединение. Поиск продолжится автоматически."); break; }
             switch (m.Type) {
+                case "teacher-message": case "open-url":
+                    if (!IsTeacher && connection == p && !paused) await ReceiveClassAction(p, m);
+                    break;
+                case "action-result":
+                    if (IsTeacher) {
+                        try { var result = System.Text.Json.JsonSerializer.Deserialize<ActionReceipt>(m.Data); if (result != null && Guid.TryParse(result.Id, out _) && pendingActions.TryGetValue((p, result.Id), out var wait)) wait.TrySetResult(result); }
+                        catch (System.Text.Json.JsonException) { Report(p.Name + ": некорректное подтверждение команды."); }
+                    } break;
                 case "capabilities":
+                    if (IsTeacher && m.Data == "message-links-v1") p.SupportsClassActions = true;
                     if (IsTeacher && m.Data == "screen-lock-v1") { p.SupportsScreenLock = true; if (lockAll) { p.LockRequested = true; p.LockToken = Guid.NewGuid().ToString(); await SafeSend(p, new("lock-screen", p.LockToken)); } } break;
                 case "lock-screen":
                     if (!IsTeacher && connection == p) {
@@ -232,11 +255,56 @@ sealed class MainWindow : Form
             }
         } } catch (Exception e) { if (!closing && !paused) Report("Соединение закрыто: " + Explain(e)); }
         finally {
+            foreach (var wait in pendingActions.Where(entry => entry.Key.Item1 == p).Select(entry => entry.Value).ToArray()) wait.TrySetException(new IOException("Соединение с учеником закрыто."));
             p.Dispose(); peers.Remove(p); students.Items.Remove(p);
             if (connection == p) { connection = null; screenLock.Release(); blocker.Dispose(); control.Checked = false; ReleaseKeys(); screen.Image?.Dispose(); screen.Image = null; }
         }
     }
     async Task SafeSend(Peer p, Packet m) { try { await p.Send(m); } catch { p.Dispose(); } }
+    async Task ReceiveClassAction(Peer p, Packet packet)
+    {
+        ClassAction? command = null;
+        try {
+            command = System.Text.Json.JsonSerializer.Deserialize<ClassAction>(packet.Data);
+            if (!ClassActions.Valid(command)) throw new InvalidOperationException("Некорректная команда или слишком длинный текст.");
+            if (packet.Type == "teacher-message") {
+                UnlockStudent("Учитель отправил сообщение");
+                messages ??= new TeacherMessageWindow(); messages.Receive(command!.Text);
+                await p.Send(new("action-result", System.Text.Json.JsonSerializer.Serialize(new ActionReceipt(command.Id, packet.Type, true, "Сообщение показано"))));
+            } else {
+                if (!ClassActions.WebAddress(command!.Text, out var uri)) throw new InvalidOperationException("Разрешены только веб-ссылки http:// и https:// без учётных данных.");
+                UnlockStudent("Учитель открыл ссылку для работы");
+                using var process = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo { FileName = uri!.AbsoluteUri, UseShellExecute = true });
+                await p.Send(new("action-result", System.Text.Json.JsonSerializer.Serialize(new ActionReceipt(command.Id, packet.Type, true, "Запрос передан браузеру"))));
+            }
+        } catch (Exception e) {
+            Report("Команда учителя: " + Explain(e));
+            if (command != null && Guid.TryParse(command.Id, out _)) await SafeSend(p, new("action-result", System.Text.Json.JsonSerializer.Serialize(new ActionReceipt(command.Id, packet.Type, false, Explain(e)))));
+        }
+    }
+    async Task SendClassAction(string kind, string text)
+    {
+        var targets = peers.ToArray();
+        lockAll = false;
+        foreach (var p in targets) p.LockRequested = false;
+        await Task.WhenAll(targets.Where(p => p.SupportsScreenLock).Select(p => SafeSend(p, new("unlock-screen"))));
+        async Task<bool> Deliver(Peer p) {
+            if (!p.SupportsClassActions) { Report(p.Name + ": обновите Student для сообщений и ссылок."); return false; }
+            var command = new ClassAction(Guid.NewGuid().ToString(), text);
+            var completed = new TaskCompletionSource<ActionReceipt>(TaskCreationOptions.RunContinuationsAsynchronously);
+            pendingActions[(p, command.Id)] = completed;
+            try {
+                await p.Send(new(kind, System.Text.Json.JsonSerializer.Serialize(command)));
+                var receipt = await completed.Task.WaitAsync(TimeSpan.FromSeconds(10));
+                if (receipt.Kind != kind) throw new InvalidOperationException("Неверный тип подтверждения.");
+                Report(p.Name + ": " + receipt.Detail); return receipt.Success;
+            } catch (TimeoutException) { Report(p.Name + ": подтверждение не получено за 10 секунд. Повтор автоматически не отправляется."); return false; }
+            catch (Exception e) { Report(p.Name + ": " + Explain(e)); return false; }
+            finally { pendingActions.Remove((p, command.Id)); }
+        }
+        var results = await Task.WhenAll(targets.Select(Deliver));
+        Report($"{(kind == "open-url" ? "Открытие ссылки" : "Показ сообщения")}: подтверждено {results.Count(x => x)} из {targets.Length}. Подробности: Teacher.log. " + (kind == "open-url" ? "Загрузка сайта браузером не проверяется." : ""));
+    }
     async Task SendScreens()
     {
         if (sending || closing) return;
