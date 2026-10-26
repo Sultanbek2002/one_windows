@@ -59,6 +59,10 @@ sealed class MainWindow : Form
     bool sending;
     bool closing;
     readonly HashSet<byte> heldKeys = [];
+    readonly ScreenBlocker blocker = new();
+    readonly System.Windows.Forms.Timer lockTimer = new() { Interval = 500 };
+    readonly ScreenLockState screenLock = new();
+    bool lockAll;
     readonly CheckBox autoControl = new() { Text = "Всегда разрешать управление доверенному учителю", AutoSize = true };
     readonly Button startup = new() { Text = "Включить автозапуск", AutoSize = true };
     readonly Button forget = new() { Text = "Сбросить доверие", AutoSize = true };
@@ -96,6 +100,16 @@ sealed class MainWindow : Form
         toolbar.Controls.AddRange([new Label { Text = "Автопоиск компьютеров в локальной сети", AutoSize = true }, connect, stop, forget, details]);
         if (IsTeacher) { toolbar.Controls.Add(broadcast); toolbar.Controls.Add(request); videoQuality.Items.AddRange(VideoProfile.All); videoQuality.SelectedIndex = 1; toolbar.Controls.Add(videoQuality); }
         else { toolbar.Controls.Add(control); toolbar.Controls.Add(autoControl); toolbar.Controls.Add(startup); }
+        if (IsTeacher) {
+            var block = new Button { Text = "Заблокировать экраны", AutoSize = true };
+            var unblock = new Button { Text = "Разблокировать все", AutoSize = true };
+            toolbar.Controls.AddRange([block, unblock]);
+            block.Click += async (_, _) => { lockAll = true; foreach (var p in peers.ToArray()) { if (!p.SupportsScreenLock) { Report(p.Name + ": обновите Student для блокировки экрана."); continue; } p.LockRequested = true; p.LockToken = Guid.NewGuid().ToString(); await SafeSend(p, new("lock-screen", p.LockToken)); } };
+            unblock.Click += async (_, _) => { lockAll = false; foreach (var p in peers.ToArray()) { p.LockRequested = false; await SafeSend(p, new("unlock-screen")); } };
+        }
+        blocker.EmergencyExit += () => UnlockStudent("Аварийный выход ученика");
+        lockTimer.Tick += (_, _) => { if (blocker.Active && screenLock.Expired(Environment.TickCount64)) UnlockStudent("Истекло ожидание подтверждения от учителя"); };
+        lockTimer.Start();
         screenArea.Controls.Add(screen); Controls.Add(screenArea); if (IsTeacher) Controls.Add(students); Controls.Add(toolbar); Controls.Add(videoInfo); Controls.Add(status);
         videoQuality.SelectedIndexChanged += (_, _) => { settings.VideoMode = videoQuality.SelectedIndex; timer.Interval = 1000 / VideoProfile.All[videoQuality.SelectedIndex].FramesPerSecond; SaveSettings(); };
         if (IsTeacher) timer.Interval = 1000 / VideoProfile.All[1].FramesPerSecond;
@@ -106,7 +120,7 @@ sealed class MainWindow : Form
         startup.Click += (_, _) => ToggleStartup();
         details.Click += (_, _) => MessageBox.Show(this, "Имя: " + Environment.MachineName + "\nСертификат: " + certificate?.GetCertHashString(HashAlgorithmName.SHA256) + "\nЖурнал: " + Path.Combine(Settings.DirectoryPath, Role + ".log"), "Сведения для первого подтверждения");
         forget.Click += (_, _) => { if (MessageBox.Show(this, "Удалить доверенные компьютеры? При следующем подключении потребуется новое подтверждение.", "Сброс доверия", MessageBoxButtons.YesNo) != DialogResult.Yes) return; paused = true; Disconnect(); settings.Trusted.Clear(); declined.Clear(); SaveSettings(); Report("Доверие сброшено. Нажмите «Возобновить поиск»."); };
-        control.CheckedChanged += async (_, _) => { if (!control.Checked) ReleaseKeys(); if (connection != null) await SafeSend(connection, new("control", control.Checked ? "yes" : "no")); };
+        control.CheckedChanged += async (_, _) => { if (!control.Checked) { ReleaseKeys(); UnlockStudent("Управление отключено"); } if (connection != null) await SafeSend(connection, new("control", control.Checked ? "yes" : "no")); };
         broadcast.CheckedChanged += async (_, _) => { if (!broadcast.Checked) foreach (var p in peers.ToArray()) await SafeSend(p, new("broadcast-stop")); };
         students.SelectedIndexChanged += async (_, _) => { screen.Image?.Dispose(); screen.Image = null; foreach (var p in peers.Where(p => p.Control).ToArray()) await SafeSend(p, new("release-keys")); };
         screen.LostFocus += async (_, _) => { if (IsTeacher) foreach (var p in peers.Where(p => p.Control).ToArray()) await SafeSend(p, new("release-keys")); };
@@ -127,7 +141,7 @@ sealed class MainWindow : Form
         menu.Items.Add("Выход", null, (_, _) => { closing = true; Close(); }); tray.ContextMenuStrip = menu;
         Resize += (_, _) => { if (!IsTeacher && WindowState == FormWindowState.Minimized) { tray.Visible = true; Hide(); } };
         FormClosing += (_, e) => { if (!IsTeacher && !closing && e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; tray.Visible = true; Hide(); } };
-        FormClosed += (_, _) => { closing = true; timer.Stop(); searchTimer.Stop(); Disconnect(); certificate?.Dispose(); tray.Dispose(); };
+        FormClosed += (_, _) => { closing = true; timer.Stop(); searchTimer.Stop(); lockTimer.Stop(); Disconnect(); blocker.Dispose(); certificate?.Dispose(); tray.Dispose(); };
         searchTimer.Tick += async (_, _) => await Search();
         Shown += async (_, _) => await StartAutomatic();
     }
@@ -149,6 +163,7 @@ sealed class MainWindow : Form
                     if (paused || closing) { p.Dispose(); return; }
                     p.Name = settings.Trusted[expected]; connection = p; control.Checked = autoControl.Checked;
                     await p.Send(new("control", control.Checked ? "yes" : "no"));
+                    await p.Send(new("capabilities", "screen-lock-v1"));
                     Report("Подключено к " + settings.Trusted[expected] + ". Экран виден учителю. " + (control.Checked ? "Управление разрешено." : "Управление выключено."));
                     _ = ReadLoop(p);
                 } catch { tcp.Dispose(); throw; }
@@ -182,6 +197,17 @@ sealed class MainWindow : Form
         try { while (!closing) {
             var m = await p.Read(); if (m == null) { Report(p.Name + ": другая сторона закрыла соединение. Поиск продолжится автоматически."); break; }
             switch (m.Type) {
+                case "capabilities":
+                    if (IsTeacher && m.Data == "screen-lock-v1") { p.SupportsScreenLock = true; if (lockAll) { p.LockRequested = true; p.LockToken = Guid.NewGuid().ToString(); await SafeSend(p, new("lock-screen", p.LockToken)); } } break;
+                case "lock-screen":
+                    if (!IsTeacher && connection == p) {
+                        if (!control.Checked) { await SafeSend(p, new("lock-state", "rejected: управление выключено")); break; }
+                        if (!screenLock.TryRenew(m.Data, Environment.TickCount64)) { await SafeSend(p, new("lock-state", "Команда блокировки устарела или отменена")); break; }
+                        try { var fresh = !blocker.Active; ReleaseKeys(); blocker.Activate(); if (fresh) await SafeSend(p, new("lock-state", "locked")); }
+                        catch (Exception e) { UnlockStudent("Ошибка блокировки: " + Explain(e)); await SafeSend(p, new("lock-state", "failed: " + Explain(e))); }
+                    } break;
+                case "unlock-screen": if (!IsTeacher && connection == p) UnlockStudent("Разблокировано учителем"); break;
+                case "lock-state": if (IsTeacher) { if (m.Data != "locked") p.LockRequested = false; Report(p.Name + ": " + m.Data); } break;
                 case "frame":
                     if (!IsTeacher || students.SelectedItem == p) {
                         var image = await Task.Run(() => { using var ms = new MemoryStream(Convert.FromBase64String(m.Data)); using var original = Image.FromStream(ms); return new Bitmap(original); });
@@ -197,17 +223,17 @@ sealed class MainWindow : Form
                 case "control": p.Control = m.Data == "yes"; status.Text = p.Name + (p.Control ? ": управление разрешено" : ": управление выключено"); break;
                 case "release-keys": if (!IsTeacher) ReleaseKeys(); break;
                 case "click": case "right":
-                    if (!IsTeacher && control.Checked) {
+                    if (!IsTeacher && control.Checked && !blocker.Active) {
                         var bounds = Screen.PrimaryScreen!.Bounds;
                         SetCursorPos(bounds.Left + m.X * bounds.Width / 65535, bounds.Top + m.Y * bounds.Height / 65535);
                         uint down = m.Type == "right" ? 8u : 2u; mouse_event(down, 0, 0, 0, UIntPtr.Zero); mouse_event(down * 2, 0, 0, 0, UIntPtr.Zero);
                     } break;
-                case "key-down": case "key-up": if (!IsTeacher && control.Checked && m.X >= 0 && m.X <= 255) { var key = (byte)m.X; if (m.Type == "key-down") heldKeys.Add(key); else heldKeys.Remove(key); keybd_event(key, 0, m.Type == "key-up" ? 2u : 0u, UIntPtr.Zero); } break;
+                case "key-down": case "key-up": if (!IsTeacher && control.Checked && !blocker.Active && m.X >= 0 && m.X <= 255) { var key = (byte)m.X; if (m.Type == "key-down") heldKeys.Add(key); else heldKeys.Remove(key); keybd_event(key, 0, m.Type == "key-up" ? 2u : 0u, UIntPtr.Zero); } break;
             }
         } } catch (Exception e) { if (!closing && !paused) Report("Соединение закрыто: " + Explain(e)); }
         finally {
             p.Dispose(); peers.Remove(p); students.Items.Remove(p);
-            if (connection == p) { connection = null; control.Checked = false; ReleaseKeys(); screen.Image?.Dispose(); screen.Image = null; }
+            if (connection == p) { connection = null; screenLock.Release(); blocker.Dispose(); control.Checked = false; ReleaseKeys(); screen.Image?.Dispose(); screen.Image = null; }
         }
     }
     async Task SafeSend(Peer p, Packet m) { try { await p.Send(m); } catch { p.Dispose(); } }
@@ -235,6 +261,7 @@ sealed class MainWindow : Form
     async Task SendVideo(Peer p, byte[] bytes) { try { await p.TrySendFrame(bytes); } catch (Exception e) { if (!closing && !paused) Report("Передача видео: " + Explain(e)); p.Dispose(); } }
     void Disconnect()
     {
+        screenLock.Release(); blocker.Dispose(); lockAll = false;
         listener?.Stop(); listener = null;
         discovery?.Dispose(); discovery = null; searchTimer.Stop();
         connection?.Dispose(); connection = null;
@@ -276,7 +303,7 @@ sealed class MainWindow : Form
     {
         if (paused || closing || announcing || discovery == null) return;
         announcing = true;
-        try { await discovery.Announce(); }
+        try { await discovery.Announce(); if (IsTeacher) foreach (var p in peers.Where(p => p.LockRequested).ToArray()) _ = SafeSend(p, new("lock-screen", p.LockToken)); }
         catch (Exception e) { Report("Поиск в сети: " + Explain(e)); }
         finally { announcing = false; }
     }
@@ -313,6 +340,7 @@ sealed class MainWindow : Form
         return $"{e.GetType().Name}: {e.Message} (0x{e.HResult:X8})";
     }
     void ReleaseKeys() { foreach (var key in heldKeys) keybd_event(key, 0, 2, UIntPtr.Zero); heldKeys.Clear(); }
+    void UnlockStudent(string reason) { var wasLocked = blocker.Active; screenLock.Release(); blocker.Dispose(); if (wasLocked) { Report(reason); if (connection != null) _ = SafeSend(connection, new("lock-state", reason)); } }
     [DllImport("user32.dll")] static extern bool SetCursorPos(int x, int y);
     [DllImport("user32.dll")] static extern void mouse_event(uint flags, uint x, uint y, uint data, UIntPtr extra);
     [DllImport("user32.dll")] static extern void keybd_event(byte key, byte scan, uint flags, UIntPtr extra);

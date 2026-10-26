@@ -96,3 +96,12 @@ var losslessPacket = System.Text.Json.JsonSerializer.Deserialize<Packet>(System.
 using var pngBuffer = new MemoryStream(Convert.FromBase64String(losslessPacket.Data)); using var restored = new Bitmap(pngBuffer);
 for (var y = 0; y < pixels.Height; y++) for (var x = 0; x < pixels.Width; x++) if (pixels.GetPixel(x, y).ToArgb() != restored.GetPixel(x, y).ToArgb()) throw new Exception("Lossless mode changed a pixel");
 Console.WriteLine("PASS: PNG maximum-quality mode preserves every source pixel exactly.");
+var lockState = new ScreenLockState(); var firstLock = Guid.NewGuid().ToString();
+if (lockState.TryRenew("invalid", 1000)) throw new Exception("Malformed lock command accepted");
+if (!lockState.TryRenew(firstLock, 1000) || lockState.Expired(12999) || !lockState.Expired(13000)) throw new Exception("Lock lease does not expire in 12 seconds");
+if (!lockState.TryRenew(firstLock, 4000) || lockState.Expired(13000) || !lockState.Expired(16000)) throw new Exception("Lock heartbeat failed to renew lease");
+lockState.Release();
+if (lockState.TryRenew(firstLock, 17000)) throw new Exception("Cancelled lock reactivated by delayed heartbeat");
+if (!lockState.TryRenew(Guid.NewGuid().ToString(), 18000)) throw new Exception("A new explicit lock could not be activated");
+lockState.Release();
+Console.WriteLine("PASS: screen-lock expiry, heartbeat renewal, emergency/unlock cancellation and explicit re-lock.");
