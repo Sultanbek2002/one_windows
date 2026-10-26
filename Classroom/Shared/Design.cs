@@ -92,8 +92,16 @@ static class Design
         header.Controls.Add(new Label { Dock = DockStyle.Fill, Text = teacher ? "КЛАСС   /   Панель учителя" : "КЛАСС   /   Рабочее место ученика", ForeColor = Color.White, Font = new Font("Segoe UI", 18, FontStyle.Bold), TextAlign = ContentAlignment.MiddleLeft });
         header.Controls.Add(new Label { Dock = DockStyle.Right, Width = 275, Text = "ЛОКАЛЬНАЯ СЕТЬ  ·  ЗАЩИЩЁННАЯ СВЯЗЬ", ForeColor = Color.FromArgb(157, 184, 223), Font = new Font("Segoe UI", 8.5f), TextAlign = ContentAlignment.MiddleRight });
         form.Controls.Add(header); header.BringToFront();
-        tools.VisibleChanged += (_, _) => header.Visible = tools.Visible;
-        var order = new Control?[] { viewer, sidebar, tools, videoInfo, status, header };
+        var footer = new Panel { Dock = DockStyle.Bottom, Height = 36, BackColor = Surface, Padding = new Padding(16, 0, 16, 0) };
+        footer.Controls.Add(new Label { Dock = DockStyle.Fill, Text = "Разработчик · Sultanbek Abdykadyrov", ForeColor = Muted, Font = new Font("Segoe UI", 9), TextAlign = ContentAlignment.MiddleLeft });
+        var instagram = new LinkLabel { Dock = DockStyle.Right, Width = 200, Text = "Instagram · @sultan_agai", LinkColor = Accent, ActiveLinkColor = Ink, VisitedLinkColor = Accent, Font = new Font("Segoe UI", 9), TextAlign = ContentAlignment.MiddleRight, LinkBehavior = LinkBehavior.HoverUnderline };
+        instagram.LinkClicked += (_, _) => {
+            try { using var process = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo { FileName = "https://www.instagram.com/sultan_agai?utm_source=ig_web_button_share_sheet&rpxt=ZDNlZDc0MzIxNw==", UseShellExecute = true }); }
+            catch (Exception e) { MessageBox.Show(form, "Не удалось открыть Instagram: " + e.Message); }
+        };
+        footer.Controls.Add(instagram); form.Controls.Add(footer);
+        tools.VisibleChanged += (_, _) => { header.Visible = tools.Visible; footer.Visible = tools.Visible; };
+        var order = new Control?[] { viewer, sidebar, tools, videoInfo, status, footer, header };
         var index = 0; foreach (var child in order.Where(c => c != null).Cast<Control>()) form.Controls.SetChildIndex(child, index++);
         form.ResumeLayout(true);
     }
