@@ -14,6 +14,11 @@ static class Program
     [STAThread] static void Main(string[] args) {
         ApplicationConfiguration.Initialize();
         if (args.Length == 2 && args[0] == "--design-preview") { Application.Run(new MainWindow(args[1])); return; }
+        if (args.Length == 1 && args[0] == "--presentation-check") {
+            using var check = new MainWindow(presentationCheck: true);
+            check.Shown += (_, _) => check.BeginInvoke((Action)(() => check.CheckPresentationWindow()));
+            Application.Run(check); return;
+        }
 #if TEACHER
         const string role = "Teacher";
 #else
@@ -69,6 +74,8 @@ sealed class MainWindow : Form
     readonly Dictionary<(Peer, string), TaskCompletionSource<ActionReceipt>> pendingActions = [];
     ClassroomGrid? overview;
     bool expandedStudent;
+    bool studentBroadcastActive;
+    Action? beginStudentBroadcast, endStudentBroadcast;
     readonly CheckBox autoControl = new() { Text = "Всегда разрешать управление доверенному учителю", AutoSize = true };
     readonly Button startup = new() { Text = "Включить автозапуск", AutoSize = true };
     readonly Button forget = new() { Text = "Сбросить доверие", AutoSize = true };
@@ -80,7 +87,7 @@ sealed class MainWindow : Form
     Discovery? discovery;
     bool paused, connecting, announcing;
     string Role => IsTeacher ? "Teacher" : "Student";
-    public MainWindow(string? previewPath = null)
+    public MainWindow(string? previewPath = null, bool presentationCheck = false)
     {
         Text = IsTeacher ? "Класс — Учитель (прототип)" : "Класс — Ученик (прототип)";
         Width = 1150; Height = 760; Font = new("Segoe UI", 10);
@@ -91,12 +98,25 @@ sealed class MainWindow : Form
             toolbar.Controls.Add(nativeSize);
             var fullscreen = new Button { Text = "На весь экран (выход: Esc)", AutoSize = true };
             var expanded = false; var previousBounds = Bounds; var previousState = WindowState;
-            void ToggleFullscreen() {
-                expanded = !expanded;
+            void SetFullscreen(bool value) {
+                if (expanded == value) return;
+                expanded = value;
                 if (expanded) { previousBounds = Bounds; previousState = WindowState; WindowState = FormWindowState.Normal; FormBorderStyle = FormBorderStyle.None; WindowState = FormWindowState.Maximized; }
                 else { WindowState = FormWindowState.Normal; FormBorderStyle = FormBorderStyle.Sizable; Bounds = previousBounds; WindowState = previousState; }
                 toolbar.Visible = !expanded; status.Visible = !expanded; videoInfo.Visible = !expanded;
             }
+            void ToggleFullscreen() { if (expanded) TopMost = false; SetFullscreen(!expanded); }
+            var wasVisible = true; var wasFullscreen = false; var wasTopMost = false; var wasNative = false; var wasState = FormWindowState.Normal;
+            beginStudentBroadcast = () => {
+                if (!studentBroadcastActive) { wasVisible = Visible; wasFullscreen = expanded; wasTopMost = TopMost; wasNative = nativeSize.Checked; wasState = WindowState; }
+                Show(); if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
+                nativeSize.Checked = false; SetFullscreen(true); WindowState = FormWindowState.Maximized;
+                TopMost = true; BringToFront(); Activate(); screen.Focus();
+            };
+            endStudentBroadcast = () => {
+                TopMost = wasTopMost; SetFullscreen(wasFullscreen); nativeSize.Checked = wasNative;
+                WindowState = wasState; if (!wasVisible) Hide();
+            };
             fullscreen.Click += (_, _) => ToggleFullscreen();
             screen.DoubleClick += (_, _) => ToggleFullscreen();
             KeyPreview = true;
@@ -184,7 +204,7 @@ sealed class MainWindow : Form
             request.Click += (_, _) => { if (students.SelectedItem is Peer peer) OpenStudent(peer); };
         }
         tray.Icon = Icon; tray.Text = IsTeacher ? "ScreenLink ADMIN" : "ScreenLink USER";
-        if (previewPath == null) Shown += async (_, _) => await StartAutomatic();
+        if (previewPath == null && !presentationCheck) Shown += async (_, _) => await StartAutomatic();
         else {
             timer.Stop(); lockTimer.Stop();
             if (IsTeacher) {
@@ -194,7 +214,7 @@ sealed class MainWindow : Form
                     overview?.UpdateFrame(name, sample);
                 }
             }
-            Shown += (_, _) => BeginInvoke((Action)(() => { using var bitmap = new Bitmap(Width, Height); DrawToBitmap(bitmap, new Rectangle(Point.Empty, bitmap.Size)); bitmap.Save(previewPath); closing = true; Close(); }));
+            if (!presentationCheck) Shown += (_, _) => BeginInvoke((Action)(() => { using var bitmap = new Bitmap(Width, Height); DrawToBitmap(bitmap, new Rectangle(Point.Empty, bitmap.Size)); bitmap.Save(previewPath!); closing = true; Close(); }));
         }
     }
     async Task Connect(string expected)
@@ -284,10 +304,11 @@ sealed class MainWindow : Form
                             if (!expandedStudent || students.SelectedItem != p) { image.Dispose(); if (!expandedStudent) videoInfo.Text = $"Обзор класса · {overview?.Count ?? 0} экранов · обновление по мере поступления кадров"; break; }
                         }
                         var old = screen.Image; screen.Image = image; old?.Dispose();
+                        ShowReceivedPresentation();
                         receivedFrames++;
                         if (videoClock.ElapsedMilliseconds >= 1000) { videoInfo.Text = $"Приём: {image.Width} × {image.Height} · {receivedFrames * 1000d / videoClock.ElapsedMilliseconds:F1} кадров/с"; receivedFrames = 0; videoClock.Restart(); }
                     } break;
-                case "broadcast-stop": screen.Image?.Dispose(); screen.Image = null; break;
+                case "broadcast-stop": if (!IsTeacher && connection == p) StopStudentBroadcast(); screen.Image?.Dispose(); screen.Image = null; break;
                 case "control-request":
                     if (!IsTeacher && !control.Checked) { Report("Доступ отключён администратором. Настройки — через ⋯."); await SafeSend(p, new("control", "no")); }
                     break;
@@ -306,7 +327,7 @@ sealed class MainWindow : Form
             foreach (var wait in pendingActions.Where(entry => entry.Key.Item1 == p).Select(entry => entry.Value).ToArray()) wait.TrySetException(new IOException("Соединение с учеником закрыто."));
             p.Dispose(); peers.Remove(p); students.Items.Remove(p);
             overview?.Remove(p); if (IsTeacher && (peers.Count == 0 || students.SelectedItem == null)) ShowOverview();
-            if (connection == p) { shutdown?.Cancel("Связь с учителем потеряна"); connection = null; screenLock.Release(); blocker.Dispose(); control.Checked = false; ReleaseKeys(); screen.Image?.Dispose(); screen.Image = null; }
+            if (connection == p) { StopStudentBroadcast(); shutdown?.Cancel("Связь с учителем потеряна"); connection = null; screenLock.Release(); blocker.Dispose(); control.Checked = false; ReleaseKeys(); screen.Image?.Dispose(); screen.Image = null; }
         }
     }
     async Task SafeSend(Peer p, Packet m) { try { await p.Send(m); } catch { p.Dispose(); } }
@@ -388,6 +409,7 @@ sealed class MainWindow : Form
     async Task SendVideo(Peer p, byte[] bytes) { try { await p.TrySendFrame(bytes); } catch (Exception e) { if (!closing && !paused) Report("Передача видео: " + Explain(e)); p.Dispose(); } }
     void Disconnect()
     {
+        StopStudentBroadcast();
         shutdown?.Cancel("Соединение закрыто");
         screenLock.Release(); blocker.Dispose(); lockAll = false;
         listener?.Stop(); listener = null;
@@ -470,6 +492,27 @@ sealed class MainWindow : Form
         return $"{e.GetType().Name}: {e.Message} (0x{e.HResult:X8})";
     }
     void ReleaseKeys() { foreach (var key in heldKeys) keybd_event(key, 0, 2, UIntPtr.Zero); heldKeys.Clear(); }
+    void StopStudentBroadcast() { if (!studentBroadcastActive) return; if (!closing) endStudentBroadcast?.Invoke(); else TopMost = false; studentBroadcastActive = false; }
+    void ShowReceivedPresentation() { if (!IsTeacher && (!studentBroadcastActive || !Visible || WindowState == FormWindowState.Minimized)) { beginStudentBroadcast?.Invoke(); studentBroadcastActive = true; } }
+    internal void CheckPresentationWindow()
+    {
+        try {
+            if (IsTeacher) throw new InvalidOperationException("Run presentation check in Student.");
+            Hide(); ShowReceivedPresentation();
+            if (!Visible || WindowState != FormWindowState.Maximized || FormBorderStyle != FormBorderStyle.None || !TopMost) throw new Exception("Hidden Student did not open fullscreen");
+            Close(); // User closing the window must put it in the tray, not stop the process.
+            if (Visible) throw new Exception("Student did not hide to tray");
+            ShowReceivedPresentation(); if (!Visible || !TopMost) throw new Exception("Incoming frame did not reopen Student");
+            StopStudentBroadcast(); if (Visible || TopMost || FormBorderStyle != FormBorderStyle.Sizable) throw new Exception("Original tray state was not restored");
+            Show(); WindowState = FormWindowState.Normal; var before = Bounds;
+            ShowReceivedPresentation(); StopStudentBroadcast();
+            if (!Visible || TopMost || WindowState != FormWindowState.Normal || Bounds != before) throw new Exception("Original normal window was not restored");
+            WindowState = FormWindowState.Minimized; ShowReceivedPresentation(); StopStudentBroadcast();
+            if (Visible || WindowState != FormWindowState.Minimized) throw new Exception("Original minimized state was not restored");
+            Console.WriteLine("PASS: hidden Student opens fullscreen above normal windows, reopens after closing to tray, and restores hidden/normal states after broadcast ends. No network connection or settings changes.");
+        } catch (Exception e) { Console.Error.WriteLine(e); Environment.ExitCode = 1; }
+        finally { closing = true; Close(); }
+    }
     void ShowOverview() { expandedStudent = false; screen.Visible = false; if (overview != null) overview.Visible = true; screen.Image?.Dispose(); screen.Image = null; }
     void OpenStudent(Peer peer)
     {
