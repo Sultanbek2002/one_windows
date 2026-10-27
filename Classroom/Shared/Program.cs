@@ -85,7 +85,7 @@ sealed class MainWindow : Form
     readonly HashSet<string> declined = [];
     Settings settings = new();
     Discovery? discovery;
-    bool paused, connecting, announcing;
+    bool paused, connecting, announcing, startingAutomatic;
     string Role => IsTeacher ? "Teacher" : "Student";
     public MainWindow(string? previewPath = null, bool presentationCheck = false)
     {
@@ -422,23 +422,30 @@ sealed class MainWindow : Form
     }
     async Task StartAutomatic()
     {
+        if (paused || closing || startingAutomatic) return;
+        startingAutomatic = true;
         try {
             if (discovery != null) { await Search(); return; }
             settings = Settings.Load(Role);
             if (!IsTeacher && settings.PermissionDefaultsVersion < 1) { settings.AutoControl = true; settings.PermissionDefaultsVersion = 1; settings.Save(Role); }
+            if (!IsTeacher && settings.StartupConfiguredVersion < 1) {
+                try { StartupRegistration.Enable(); settings.StartupConfiguredVersion = 1; settings.Save(Role); Report("Автозапуск Student включён для текущего пользователя Windows. Не перемещайте файлы программы."); }
+                catch (Exception e) { Report("Не удалось включить автозапуск: " + Explain(e) + ". Ручное подключение продолжится."); }
+            }
             if (IsTeacher) videoQuality.SelectedIndex = Math.Clamp(settings.VideoMode, 0, VideoProfile.All.Length - 1);
             autoControl.Checked = settings.AutoControl;
             certificate ??= ClassCertificate.LoadIdentity(Role);
-            if (IsTeacher) {
+            if (IsTeacher && listener == null) {
                 listener = new TcpListener(IPAddress.Any, Port); listener.Start();
                 _ = AcceptLoop(listener, certificate);
-            } else {
+            } else if (!IsTeacher) {
                 tray.Visible = true;
                 using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run");
                 startup.Text = key?.GetValue("ClassroomStudent") == null ? "Включить автозапуск" : "Отключить автозапуск";
             }
             discovery = new Discovery(IsTeacher, certificate.GetCertHashString(HashAlgorithmName.SHA256));
-            _ = discovery.Listen(async (beacon, ip) => {
+            var activeDiscovery = discovery;
+            _ = activeDiscovery.Listen(async (beacon, ip) => {
                 if (paused || closing || IsTeacher || connection != null || connecting) return;
                 if (!settings.Trusted.ContainsKey(beacon.Pin) && settings.Trusted.Count > 0) {
                     if (settings.Trusted.Values.Contains(beacon.Name)) Report("У найденного учителя изменился сертификат. Подключение остановлено. Проверьте компьютер и при необходимости сбросьте доверие.");
@@ -446,17 +453,20 @@ sealed class MainWindow : Form
                 }
                 if (!Trust(beacon.Pin, beacon.Name, "учителя")) return;
                 address.Text = ip.ToString(); await Connect(beacon.Pin);
-            }, e => Report("Автопоиск: " + Explain(e)));
+            }, e => { if (ReferenceEquals(discovery, activeDiscovery)) { activeDiscovery.Dispose(); discovery = null; if (!paused && !closing) searchTimer.Start(); Report("Автопоиск: " + Explain(e) + ". Повторный запуск через 3 секунды."); } });
             Report(IsTeacher ? "Класс открыт. Компьютеры появятся автоматически. Для новых учеников подтвердите добавление." : "Поиск учителя… Если он не найден: проверьте запуск Teacher, одну подсеть и разрешение UDP 47832/47833 в частной сети.");
             searchTimer.Start(); await Search();
-        } catch (Exception e) { Disconnect(); Report("Запуск автопоиска: " + Explain(e)); }
+        } catch (Exception e) { Disconnect(); Report("Запуск автопоиска: " + Explain(e) + ". Повтор через 3 секунды."); if (!paused && !closing) searchTimer.Start(); }
+        finally { startingAutomatic = false; }
     }
     async Task Search()
     {
-        if (paused || closing || announcing || discovery == null) return;
+        if (paused || closing || announcing) return;
+        if (discovery == null) { await StartAutomatic(); return; }
         announcing = true;
-        try { await discovery.Announce(); if (IsTeacher) foreach (var p in peers.Where(p => p.LockRequested).ToArray()) _ = SafeSend(p, new("lock-screen", p.LockToken)); }
-        catch (Exception e) { Report("Поиск в сети: " + Explain(e)); }
+        var activeDiscovery = discovery;
+        try { await activeDiscovery.Announce(); if (IsTeacher) foreach (var p in peers.Where(p => p.LockRequested).ToArray()) _ = SafeSend(p, new("lock-screen", p.LockToken)); }
+        catch (Exception e) { if (ReferenceEquals(discovery, activeDiscovery)) { activeDiscovery.Dispose(); discovery = null; } Report("Поиск в сети: " + Explain(e) + ". Повтор через 3 секунды."); }
         finally { announcing = false; }
     }
     bool Trust(string pin, string name, string kind)
@@ -472,9 +482,9 @@ sealed class MainWindow : Form
     void ToggleStartup()
     {
         try {
-            using var key = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run");
-            if (key.GetValue("ClassroomStudent") != null) { key.DeleteValue("ClassroomStudent"); startup.Text = "Включить автозапуск"; Report("Автозапуск отключён."); }
-            else { key.SetValue("ClassroomStudent", "\"" + Environment.ProcessPath + "\""); startup.Text = "Отключить автозапуск"; Report("Автозапуск включён при входе текущего пользователя в Windows. Не перемещайте файлы программы."); }
+            if (StartupRegistration.Enabled()) { StartupRegistration.Disable(); startup.Text = "Включить автозапуск"; Report("Автозапуск отключён."); }
+            else { StartupRegistration.Enable(); startup.Text = "Отключить автозапуск"; Report("Автозапуск включён при входе текущего пользователя в Windows. Не перемещайте файлы программы."); }
+            settings.StartupConfiguredVersion = 1; settings.Save(Role);
         } catch (Exception e) { Report("Автозапуск: " + Explain(e)); }
     }
     void Report(string message)

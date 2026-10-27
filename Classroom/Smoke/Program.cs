@@ -143,3 +143,6 @@ foreach (var width in new[] { 100, 210, 450, 670, 900, 1400 }) {
 }
 if (GridSizing.Columns(900) != 4 || GridSizing.Columns(670) != 3 || GridSizing.Columns(450) != 2 || GridSizing.Columns(210) != 1) throw new Exception("Student grid is not responsive");
 Console.WriteLine("PASS: responsive student grid uses one to four columns without horizontal overflow.");
+if (StartupRegistration.Command(@"C:\School Apps\Student.exe") != "\"C:\\School Apps\\Student.exe\"") throw new Exception("Startup executable path was not quoted");
+if (new Settings().StartupConfiguredVersion != 0) throw new Exception("New or old settings must enroll automatic startup once");
+Console.WriteLine("PASS: startup path quoting and enrollment defaults; registry was not modified and reboot was not tested.");

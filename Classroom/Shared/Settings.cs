@@ -6,6 +6,7 @@ sealed class Settings
     public bool AutoControl { get; set; } = true;
     public int VideoMode { get; set; } = 1;
     public int PermissionDefaultsVersion { get; set; }
+    public int StartupConfiguredVersion { get; set; }
     public static string DirectoryPath => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Classroom");
     public static string PathFor(string role) => Path.Combine(DirectoryPath, role + ".json");
     public static Settings Load(string role) => File.Exists(PathFor(role)) ? JsonSerializer.Deserialize<Settings>(File.ReadAllText(PathFor(role))) ?? new() : new();
