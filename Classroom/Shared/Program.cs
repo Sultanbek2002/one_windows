@@ -161,13 +161,15 @@ sealed class MainWindow : Form
         timer.Tick += async (_, _) => await SendScreens(); timer.Start();
         tray.DoubleClick += (_, _) => { Show(); WindowState = FormWindowState.Normal; Activate(); };
         var menu = new ContextMenuStrip(); menu.Items.Add("Открыть", null, (_, _) => { Show(); WindowState = FormWindowState.Normal; Activate(); });
-        menu.Items.Add("Приостановить доступ", null, (_, _) => { paused = true; Disconnect(); });
-        menu.Items.Add("Выход", null, (_, _) => { closing = true; Close(); }); tray.ContextMenuStrip = menu;
+        Action? showAdmin = null;
+        menu.Items.Add("⋯ Настройки администратора", null, (_, _) => showAdmin?.Invoke());
+        tray.ContextMenuStrip = menu;
         Resize += (_, _) => { if (!IsTeacher && WindowState == FormWindowState.Minimized) { tray.Visible = true; Hide(); } };
         FormClosing += (_, e) => { if (!IsTeacher && !closing && e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; tray.Visible = true; Hide(); } };
         FormClosed += (_, _) => { closing = true; timer.Stop(); searchTimer.Stop(); lockTimer.Stop(); Disconnect(); shutdown?.Dispose(); messages?.Dispose(); blocker.Dispose(); certificate?.Dispose(); tray.Dispose(); };
         searchTimer.Tick += async (_, _) => await Search();
-        Design.ApplyMain(this, IsTeacher, toolbar, students, screenArea, status, videoInfo, broadcast, videoQuality);
+        showAdmin = Design.ApplyMain(this, IsTeacher, toolbar, students, screenArea, status, videoInfo, broadcast, videoQuality);
+        tray.Icon = Icon; tray.Text = IsTeacher ? "ScreenLink ADMIN" : "ScreenLink USER";
         if (previewPath == null) Shown += async (_, _) => await StartAutomatic();
         else {
             timer.Stop(); lockTimer.Stop();
@@ -260,7 +262,7 @@ sealed class MainWindow : Form
                     } break;
                 case "broadcast-stop": screen.Image?.Dispose(); screen.Image = null; break;
                 case "control-request":
-                    if (!IsTeacher && !control.Checked && MessageBox.Show(this, "Разрешить учителю управлять мышью и клавиатурой? Снять разрешение можно в этом окне.", "Запрос учителя", MessageBoxButtons.YesNo) == DialogResult.Yes) control.Checked = true;
+                    if (!IsTeacher && !control.Checked) { Report("Доступ отключён администратором. Настройки — через ⋯."); await SafeSend(p, new("control", "no")); }
                     break;
                 case "control": p.Control = m.Data == "yes"; status.Text = p.Name + (p.Control ? ": управление разрешено" : ": управление выключено"); break;
                 case "release-keys": if (!IsTeacher) ReleaseKeys(); break;
@@ -372,6 +374,7 @@ sealed class MainWindow : Form
         try {
             if (discovery != null) { await Search(); return; }
             settings = Settings.Load(Role);
+            if (!IsTeacher && settings.PermissionDefaultsVersion < 1) { settings.AutoControl = true; settings.PermissionDefaultsVersion = 1; settings.Save(Role); }
             if (IsTeacher) videoQuality.SelectedIndex = Math.Clamp(settings.VideoMode, 0, VideoProfile.All.Length - 1);
             autoControl.Checked = settings.AutoControl;
             certificate ??= ClassCertificate.LoadIdentity(Role);

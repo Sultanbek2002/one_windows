@@ -16,10 +16,13 @@ static class Design
         form.BackColor = Surface; form.ForeColor = Ink; form.Font = new Font("Segoe UI", 10); form.Padding = new Padding(24);
         form.MinimumSize = new Size(580, 320);
     }
-    public static void ApplyMain(Form form, bool teacher, FlowLayoutPanel tools, ListBox students, Panel viewer, TextBox status, Label videoInfo, CheckBox broadcast, ComboBox quality)
+    public static Action? ApplyMain(Form form, bool teacher, FlowLayoutPanel tools, ListBox students, Panel viewer, TextBox status, Label videoInfo, CheckBox broadcast, ComboBox quality)
     {
         form.SuspendLayout(); form.BackColor = Surface; form.ForeColor = Ink;
-        form.Text = teacher ? "Класс · Панель учителя" : "Класс · Рабочее место ученика";
+        form.Text = teacher ? "ScreenLink ADMIN · Панель учителя" : "ScreenLink USER · Рабочее место ученика";
+        form.Icon = Icon.ExtractAssociatedIcon(Environment.ProcessPath!) ?? SystemIcons.Application;
+        Action? openAdmin = null;
+        var logo = Branding.Logo(teacher); form.Disposed += (_, _) => logo.Dispose();
         form.Width = 1360; form.Height = 860; form.MinimumSize = new Size(1120, 700); form.StartPosition = FormStartPosition.CenterScreen;
         var original = tools.Controls.Cast<Control>().ToArray(); tools.Controls.Clear();
         var tips = new ToolTip { AutoPopDelay = 6000 }; foreach (var child in original) tips.SetToolTip(child, child.Text); form.Disposed += (_, _) => tips.Dispose();
@@ -86,21 +89,33 @@ static class Design
             var refresh = new System.Windows.Forms.Timer { Interval = 1000 }; refresh.Tick += (_, _) => count.Text = $"В сети · {students.Items.Count}"; refresh.Start(); form.Disposed += (_, _) => refresh.Dispose();
         } else {
             Card("Просмотр экрана", 320, Find("Масштаб 1:1 (прокрутка)"), Find("На весь экран (выход: Esc)"));
-            var permission = Find("Всегда разрешать управление доверенному учителю"); if (permission != null) { permission.AutoSize = false; permission.Width = 300; permission.Height = 46; }
-            Card("Доступ учителя", 335, Find("Управление разрешено"), permission);
-            Card("Подключение", 330, connect, stop, details, forget, Find("Включить автозапуск"));
-            foreach (var card in tools.Controls.OfType<FlowLayoutPanel>()) card.Height = 162;
-            tools.Height = 190;
+            var permission = Find("Всегда разрешать управление доверенному учителю"); if (permission != null) { permission.AutoSize = false; permission.Width = 440; permission.Height = 46; }
+            var adminControls = new[] { Find("Управление разрешено"), permission, connect, stop, details, forget, Find("Включить автозапуск") }.Where(c => c != null).Cast<Control>().ToArray();
+            foreach (var control in adminControls) assigned.Add(control);
+            openAdmin = () => StudentAdmin.Open(form, adminControls);
+            form.Disposed += (_, _) => { foreach (var control in adminControls) control.Dispose(); };
+            var access = new Label { Width = 400, Height = 70, ForeColor = Muted };
+            void AccessText() { access.Text = permission is CheckBox box && box.Checked ? "Автоматический доступ доверенному учителю включён.\n\nНастройки администратора — через ⋯." : "Автоматический доступ ожидает настройки.\n\nНастройки администратора — через ⋯."; }
+            if (permission is CheckBox check) check.CheckedChanged += (_, _) => AccessText(); AccessText();
+            Card("Управляемое рабочее место", 440, access);
         }
         foreach (var child in original.Where(c => !assigned.Contains(c))) if (child is not Label) { tools.Controls.Add(child); }
         viewer.BackColor = Color.FromArgb(18, 26, 40);
         var screen = viewer.Controls.OfType<PictureBox>().First();
-        screen.Paint += (_, e) => { if (screen.Image == null) { using var font = new Font("Segoe UI", 14); TextRenderer.DrawText(e.Graphics, teacher ? "Выберите компьютер ученика\n\nПодключённые компьютеры появятся слева" : "Готово к работе\n\nЭкран учителя появится здесь во время демонстрации", font, screen.ClientRectangle, Color.FromArgb(158, 175, 199), TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.WordBreak); } };
+        screen.Paint += (_, e) => { if (screen.Image == null) {
+            var size = Math.Max(48, Math.Min(260, Math.Min(screen.Width / 2, screen.Height - 110)));
+            var y = Math.Max(8, (screen.Height - size - 80) / 2);
+            e.Graphics.DrawImage(logo, new Rectangle((screen.Width - size) / 2, y, size, size));
+            using var font = new Font("Segoe UI", 12);
+            TextRenderer.DrawText(e.Graphics, teacher ? "Выберите компьютер ученика\nПодключённые компьютеры появятся слева" : "Экран учителя появится здесь во время демонстрации", font, new Rectangle(8, y + size + 12, Math.Max(1, screen.Width - 16), 66), Color.FromArgb(158, 175, 199), TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.WordBreak);
+        } };
         status.BorderStyle = BorderStyle.None; status.BackColor = Color.White; status.ForeColor = Muted; status.Height = 58; status.Font = new Font("Segoe UI", 9); status.Margin = new Padding(16);
         videoInfo.BackColor = Color.FromArgb(230, 237, 247); videoInfo.ForeColor = Ink; videoInfo.Height = 30; videoInfo.Padding = new Padding(14, 6, 0, 0); videoInfo.Font = new Font("Segoe UI", 9);
         var header = new Panel { Dock = DockStyle.Top, Height = 76, BackColor = Color.FromArgb(21, 39, 66), Padding = new Padding(22, 12, 22, 8) };
-        header.Controls.Add(new Label { Dock = DockStyle.Fill, Text = teacher ? "КЛАСС   /   Панель учителя" : "КЛАСС   /   Рабочее место ученика", ForeColor = Color.White, Font = new Font("Segoe UI", 18, FontStyle.Bold), TextAlign = ContentAlignment.MiddleLeft });
+        header.Controls.Add(new Label { Dock = DockStyle.Fill, Text = teacher ? "ScreenLink ADMIN   /   Учитель" : "ScreenLink USER   /   Ученик", ForeColor = Color.White, Font = new Font("Segoe UI", 18, FontStyle.Bold), TextAlign = ContentAlignment.MiddleLeft, Padding = new Padding(12, 0, 0, 0) });
+        header.Controls.Add(new PictureBox { Dock = DockStyle.Left, Width = 56, Image = logo, SizeMode = PictureBoxSizeMode.Zoom });
         header.Controls.Add(new Label { Dock = DockStyle.Right, Width = 275, Text = "ЛОКАЛЬНАЯ СЕТЬ  ·  ЗАЩИЩЁННАЯ СВЯЗЬ", ForeColor = Color.FromArgb(157, 184, 223), Font = new Font("Segoe UI", 8.5f), TextAlign = ContentAlignment.MiddleRight });
+        if (!teacher) { var more = new Button { Text = "⋯", Dock = DockStyle.Right, Width = 48, Font = new Font("Segoe UI", 20), FlatStyle = FlatStyle.Flat, ForeColor = Color.White, BackColor = Color.FromArgb(35, 55, 82), Cursor = Cursors.Hand }; more.FlatAppearance.BorderSize = 0; more.Click += (_, _) => openAdmin?.Invoke(); header.Controls.Add(more); }
         form.Controls.Add(header); header.BringToFront();
         var footer = new Panel { Dock = DockStyle.Bottom, Height = 36, BackColor = Surface, Padding = new Padding(16, 0, 16, 0) };
         footer.Controls.Add(new Label { Dock = DockStyle.Fill, Text = "Разработчик · Sultanbek Abdykadyrov", ForeColor = Muted, Font = new Font("Segoe UI", 9), TextAlign = ContentAlignment.MiddleLeft });
@@ -114,5 +129,6 @@ static class Design
         var order = new Control?[] { viewer, sidebar, tools, videoInfo, status, footer, header };
         var index = 0; foreach (var child in order.Where(c => c != null).Cast<Control>()) form.Controls.SetChildIndex(child, index++);
         form.ResumeLayout(true);
+        return openAdmin;
     }
 }

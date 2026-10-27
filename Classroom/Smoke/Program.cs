@@ -134,3 +134,6 @@ if (powerState.ExecuteIfDue(62000, () => shutdownCalls++)) throw new Exception("
 powerState.Schedule(70000); powerState.Cancel();
 if (powerState.ExecuteIfDue(200000, () => shutdownCalls++) || shutdownCalls != 1) throw new Exception("Cancelled shutdown executed");
 Console.WriteLine("PASS: 60-second shutdown countdown, cancellation and one-shot execution with fake callback; no system shutdown performed.");
+if (!AdminPassword.Matches("sultan_nice") || AdminPassword.Matches("") || AdminPassword.Matches("wrong-password") || AdminPassword.Matches("SULTAN_NICE")) throw new Exception("Administrator password verification failed");
+if (!new Settings().AutoControl) throw new Exception("New student configuration must grant trusted-teacher control by default");
+Console.WriteLine("PASS: administrator password matching/rejection and default trusted-teacher access; no user settings modified.");
