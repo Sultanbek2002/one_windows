@@ -67,6 +67,8 @@ sealed class MainWindow : Form
     TeacherMessageWindow? messages;
     ShutdownCountdown? shutdown;
     readonly Dictionary<(Peer, string), TaskCompletionSource<ActionReceipt>> pendingActions = [];
+    ClassroomGrid? overview;
+    bool expandedStudent;
     readonly CheckBox autoControl = new() { Text = "Всегда разрешать управление доверенному учителю", AutoSize = true };
     readonly Button startup = new() { Text = "Включить автозапуск", AutoSize = true };
     readonly Button forget = new() { Text = "Сбросить доверие", AutoSize = true };
@@ -169,11 +171,29 @@ sealed class MainWindow : Form
         FormClosed += (_, _) => { closing = true; timer.Stop(); searchTimer.Stop(); lockTimer.Stop(); Disconnect(); shutdown?.Dispose(); messages?.Dispose(); blocker.Dispose(); certificate?.Dispose(); tray.Dispose(); };
         searchTimer.Tick += async (_, _) => await Search();
         showAdmin = Design.ApplyMain(this, IsTeacher, toolbar, students, screenArea, status, videoInfo, broadcast, videoQuality);
+        if (IsTeacher) {
+            overview = new ClassroomGrid();
+            var navigation = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 44, BackColor = Design.Surface, Padding = new Padding(12, 4, 0, 0) };
+            var all = new Button { Text = "Все экраны", AutoSize = true }; Design.Button(all, true);
+            navigation.Controls.Add(all); navigation.Controls.Add(new Label { Text = "До 4 экранов в ряд · Нажмите на карточку для просмотра", AutoSize = true, ForeColor = Design.Muted, Padding = new Padding(8, 8, 0, 0) });
+            all.Click += (_, _) => ShowOverview();
+            overview.OpenRequested += key => { if (key is Peer peer) OpenStudent(peer); };
+            screenArea.Controls.Add(overview); screenArea.Controls.Add(navigation); overview.BringToFront(); screen.Visible = false;
+            screenArea.Controls.SetChildIndex(overview, 0); screenArea.Controls.SetChildIndex(screen, 1); screenArea.Controls.SetChildIndex(navigation, 2);
+            students.SelectedIndexChanged += (_, _) => { if (expandedStudent && students.SelectedItem is Peer peer) OpenStudent(peer); };
+            request.Click += (_, _) => { if (students.SelectedItem is Peer peer) OpenStudent(peer); };
+        }
         tray.Icon = Icon; tray.Text = IsTeacher ? "ScreenLink ADMIN" : "ScreenLink USER";
         if (previewPath == null) Shown += async (_, _) => await StartAutomatic();
         else {
             timer.Stop(); lockTimer.Stop();
-            if (IsTeacher) students.Items.AddRange(["CLASSROOM-PC01", "CLASSROOM-PC02", "CLASSROOM-PC03"]);
+            if (IsTeacher) {
+                foreach (var name in Enumerable.Range(1, 8).Select(i => $"CLASSROOM-PC{i:00}")) {
+                    students.Items.Add(name); overview?.Add(name, name);
+                    var sample = new Bitmap(480, 270); using (var g = Graphics.FromImage(sample)) { g.Clear(Color.FromArgb(32, 62, 93)); using var font = new Font("Segoe UI", 20); g.DrawString(name, font, Brushes.White, 36, 96); }
+                    overview?.UpdateFrame(name, sample);
+                }
+            }
             Shown += (_, _) => BeginInvoke((Action)(() => { using var bitmap = new Bitmap(Width, Height); DrawToBitmap(bitmap, new Rectangle(Point.Empty, bitmap.Size)); bitmap.Save(previewPath); closing = true; Close(); }));
         }
     }
@@ -221,6 +241,7 @@ sealed class MainWindow : Form
             var pin = ssl.RemoteCertificate!.GetCertHashString(HashAlgorithmName.SHA256);
             if (!Trust(pin, hello.Data, "ученика")) { await p.Send(new("rejected", "Учитель отклонил добавление компьютера.")); return; }
             p.Name = hello.Data; await p.Send(new("accepted")); peers.Add(p); students.Items.Add(p);
+            overview?.Add(p, p.Name);
             if (students.SelectedIndex < 0) students.SelectedIndex = 0;
             await ReadLoop(p);
         } catch (Exception e) { if (!closing && listener == server) Report("Входящее подключение: " + Explain(e)); }
@@ -253,9 +274,15 @@ sealed class MainWindow : Form
                 case "unlock-screen": if (!IsTeacher && connection == p) UnlockStudent("Разблокировано учителем"); break;
                 case "lock-state": if (IsTeacher) { if (m.Data != "locked") p.LockRequested = false; Report(p.Name + ": " + m.Data); } break;
                 case "frame":
-                    if (!IsTeacher || students.SelectedItem == p) {
+                    if (!IsTeacher || peers.Contains(p)) {
                         var image = await Task.Run(() => { using var ms = new MemoryStream(Convert.FromBase64String(m.Data)); using var original = Image.FromStream(ms); return new Bitmap(original); });
-                        if (closing || paused || (IsTeacher ? students.SelectedItem != p : connection != p)) { image.Dispose(); break; }
+                        if (closing || paused || (IsTeacher ? !peers.Contains(p) : connection != p)) { image.Dispose(); break; }
+                        if (IsTeacher) {
+                            var thumbnail = await Task.Run(() => { var width = Math.Min(480, image.Width); return new Bitmap(image, new Size(width, Math.Max(1, image.Height * width / image.Width))); });
+                            if (closing || paused || !peers.Contains(p)) { image.Dispose(); thumbnail.Dispose(); break; }
+                            overview?.UpdateFrame(p, thumbnail);
+                            if (!expandedStudent || students.SelectedItem != p) { image.Dispose(); if (!expandedStudent) videoInfo.Text = $"Обзор класса · {overview?.Count ?? 0} экранов · обновление по мере поступления кадров"; break; }
+                        }
                         var old = screen.Image; screen.Image = image; old?.Dispose();
                         receivedFrames++;
                         if (videoClock.ElapsedMilliseconds >= 1000) { videoInfo.Text = $"Приём: {image.Width} × {image.Height} · {receivedFrames * 1000d / videoClock.ElapsedMilliseconds:F1} кадров/с"; receivedFrames = 0; videoClock.Restart(); }
@@ -278,6 +305,7 @@ sealed class MainWindow : Form
         finally {
             foreach (var wait in pendingActions.Where(entry => entry.Key.Item1 == p).Select(entry => entry.Value).ToArray()) wait.TrySetException(new IOException("Соединение с учеником закрыто."));
             p.Dispose(); peers.Remove(p); students.Items.Remove(p);
+            overview?.Remove(p); if (IsTeacher && (peers.Count == 0 || students.SelectedItem == null)) ShowOverview();
             if (connection == p) { shutdown?.Cancel("Связь с учителем потеряна"); connection = null; screenLock.Release(); blocker.Dispose(); control.Checked = false; ReleaseKeys(); screen.Image?.Dispose(); screen.Image = null; }
         }
     }
@@ -366,6 +394,7 @@ sealed class MainWindow : Form
         discovery?.Dispose(); discovery = null; searchTimer.Stop();
         connection?.Dispose(); connection = null;
         foreach (var p in peers.ToArray()) p.Dispose(); peers.Clear(); students.Items.Clear();
+        overview?.Clear(); if (IsTeacher) ShowOverview();
         control.Checked = false; ReleaseKeys(); broadcast.Checked = false; connect.Enabled = true;
         screen.Image?.Dispose(); screen.Image = null; status.Text = "Отключено";
     }
@@ -441,6 +470,14 @@ sealed class MainWindow : Form
         return $"{e.GetType().Name}: {e.Message} (0x{e.HResult:X8})";
     }
     void ReleaseKeys() { foreach (var key in heldKeys) keybd_event(key, 0, 2, UIntPtr.Zero); heldKeys.Clear(); }
+    void ShowOverview() { expandedStudent = false; screen.Visible = false; if (overview != null) overview.Visible = true; screen.Image?.Dispose(); screen.Image = null; }
+    void OpenStudent(Peer peer)
+    {
+        if (!peers.Contains(peer)) return;
+        if (students.SelectedItem != peer) students.SelectedItem = peer;
+        expandedStudent = true; if (overview != null) overview.Visible = false;
+        var old = screen.Image; screen.Image = overview?.Snapshot(peer); old?.Dispose(); screen.Visible = true; screen.Focus();
+    }
     void UnlockStudent(string reason) { var wasLocked = blocker.Active; screenLock.Release(); blocker.Dispose(); if (wasLocked) { Report(reason); if (connection != null) _ = SafeSend(connection, new("lock-state", reason)); } }
     [DllImport("user32.dll")] static extern bool SetCursorPos(int x, int y);
     [DllImport("user32.dll")] static extern void mouse_event(uint flags, uint x, uint y, uint data, UIntPtr extra);

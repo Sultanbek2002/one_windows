@@ -137,3 +137,9 @@ Console.WriteLine("PASS: 60-second shutdown countdown, cancellation and one-shot
 if (!AdminPassword.Matches("sultan_nice") || AdminPassword.Matches("") || AdminPassword.Matches("wrong-password") || AdminPassword.Matches("SULTAN_NICE")) throw new Exception("Administrator password verification failed");
 if (!new Settings().AutoControl) throw new Exception("New student configuration must grant trusted-teacher control by default");
 Console.WriteLine("PASS: administrator password matching/rejection and default trusted-teacher access; no user settings modified.");
+foreach (var width in new[] { 100, 210, 450, 670, 900, 1400 }) {
+    var columns = GridSizing.Columns(width); var card = GridSizing.TileWidth(width, columns);
+    if (columns < 1 || columns > 4 || card * columns + 12 * (columns - 1) > width) throw new Exception("Student grid exceeds available width");
+}
+if (GridSizing.Columns(900) != 4 || GridSizing.Columns(670) != 3 || GridSizing.Columns(450) != 2 || GridSizing.Columns(210) != 1) throw new Exception("Student grid is not responsive");
+Console.WriteLine("PASS: responsive student grid uses one to four columns without horizontal overflow.");
