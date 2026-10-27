@@ -125,3 +125,12 @@ foreach (var invalid in new[] { "file:///C:/Windows/notepad.exe", "javascript:al
 foreach (var valid in new[] { "https://example.com/lesson?q=hello%20world", "http://192.168.0.79:8080/" }) if (!ClassActions.WebAddress(valid, out _)) throw new Exception("Valid web URL rejected");
 if (ClassActions.Valid(new ClassAction(Guid.NewGuid().ToString(), new string('x', 20001))) || ClassActions.Valid(new ClassAction(Guid.NewGuid().ToString(), "  "))) throw new Exception("Invalid teacher message accepted");
 Console.WriteLine("PASS: web URL scheme/credential/control-character validation and message length limits.");
+var powerState = new ShutdownState(); var shutdownCalls = 0;
+powerState.Schedule(1000);
+if (powerState.ExecuteIfDue(60999, () => shutdownCalls++)) throw new Exception("Shutdown occurred before countdown finished");
+powerState.Schedule(30000);
+if (!powerState.ExecuteIfDue(61000, () => shutdownCalls++) || shutdownCalls != 1) throw new Exception("Shutdown countdown or duplicate scheduling failed");
+if (powerState.ExecuteIfDue(62000, () => shutdownCalls++)) throw new Exception("Shutdown executed twice");
+powerState.Schedule(70000); powerState.Cancel();
+if (powerState.ExecuteIfDue(200000, () => shutdownCalls++) || shutdownCalls != 1) throw new Exception("Cancelled shutdown executed");
+Console.WriteLine("PASS: 60-second shutdown countdown, cancellation and one-shot execution with fake callback; no system shutdown performed.");

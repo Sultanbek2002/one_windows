@@ -53,6 +53,16 @@ static class Design
             Shorten("Заблокировать экраны", "Заблокировать", 170); Shorten("Разблокировать все", "Разблокировать", 170);
             Card("Внимание класса", 200, block, unblock);
             Card("Подключение", 255, connect, stop, details, forget);
+            var power = Find("Выключить учеников"); var cancelPower = Find("Отменить выключение");
+            Shorten("Выключить учеников", "Выключить учеников", 195); Shorten("Отменить выключение", "Отменить выключение", 195);
+            if (power is Button powerButton) Button(powerButton, danger: true);
+            Card("Завершение работы", 225, power, cancelPower);
+            void Reflow() {
+                var available = tools.ClientSize.Width - tools.Padding.Horizontal; var row = 0; var rows = 1;
+                foreach (Control card in tools.Controls) { var width = card.Width + card.Margin.Horizontal; if (row > 0 && row + width > available) { rows++; row = 0; } row += width; }
+                var height = tools.Padding.Vertical + rows * 128; if (tools.Height != height) tools.Height = height;
+            }
+            tools.SizeChanged += (_, _) => Reflow(); Reflow();
             var manage = Find("Управлять выбранным");
             if (manage is Button manageButton) { assigned.Add(manageButton); manageButton.Dock = DockStyle.Top; manageButton.AutoSize = false; manageButton.Height = 40; manageButton.Text = "Управлять выбранным"; }
             var side = new Panel { Dock = DockStyle.Left, Width = 228, BackColor = Color.White, Padding = new Padding(14, 12, 14, 14) };
