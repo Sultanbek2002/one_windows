@@ -8,6 +8,8 @@ using System.Security.Cryptography.X509Certificates;
 using var cert = ClassCertificate.Create();
 using var studentCert = ClassCertificate.Create();
 var fingerprint = cert.GetCertHashString(HashAlgorithmName.SHA256);
+var attachmentBytes = Enumerable.Range(0, 150000).Select(i => (byte)(i * 17 % 256)).ToArray();
+var attachmentOffer = new AttachmentOffer(Guid.NewGuid().ToString(), "Задание №1.pdf", attachmentBytes.Length, Convert.ToHexString(SHA256.HashData(attachmentBytes)));
 var actionSamples = new[] { new ClassAction(Guid.NewGuid().ToString(), "Задание №1\nСкопируйте этот текст: Привет!"), new ClassAction(Guid.NewGuid().ToString(), "https://example.com/lesson?q=1&lang=ru") };
 var server = new TcpListener(IPAddress.Loopback, 0);
 server.Start();
@@ -30,6 +32,14 @@ try
             var receipt = ack?.Type == "action-result" ? System.Text.Json.JsonSerializer.Deserialize<ActionReceipt>(ack.Data) : null;
             if (receipt?.Id != actionSamples[i].Id || receipt.Kind != kind || !receipt.Success) throw new Exception("Message/link delivery acknowledgement corrupted");
         }
+        await peer.Send(new("file-begin", System.Text.Json.JsonSerializer.Serialize(attachmentOffer)));
+        for (var offset = 0; offset < attachmentBytes.Length; offset += AttachmentReceiver.ChunkBytes) {
+            var chunk = new AttachmentChunk(attachmentOffer.Id, offset, Convert.ToBase64String(attachmentBytes, offset, Math.Min(AttachmentReceiver.ChunkBytes, attachmentBytes.Length - offset)));
+            await peer.Send(new("file-chunk", System.Text.Json.JsonSerializer.Serialize(chunk))); await peer.Send(new("ping"));
+        }
+        await peer.Send(new("file-end", attachmentOffer.Id));
+        var receivedFile = await peer.Read();
+        if (receivedFile?.Type != "action-result" || System.Text.Json.JsonSerializer.Deserialize<ActionReceipt>(receivedFile.Data) is not { Success: true, Kind: "attachment" } receiptFile || receiptFile.Id != attachmentOffer.Id) throw new Exception("File receipt corrupted");
         var frame = await peer.Read();
         if (frame?.Type != "frame" || frame.Data.Length != 300000 || frame.X != 1920) throw new Exception("Large frame corrupted");
         await peer.Send(new("control", "no"));
@@ -48,11 +58,24 @@ try
         if (i == 1 && !ClassActions.WebAddress(action!.Text, out _)) throw new Exception("Valid web URL rejected");
         await client.Send(new("action-result", System.Text.Json.JsonSerializer.Serialize(new ActionReceipt(action!.Id, kind, true, "Simulated receiver accepted payload"))));
     }
+    var beginFile = await client.Read(); if (beginFile?.Type != "file-begin") throw new Exception("Missing file metadata");
+    using (var receiver = new AttachmentReceiver()) {
+        receiver.Begin(System.Text.Json.JsonSerializer.Deserialize<AttachmentOffer>(beginFile.Data)!, 1000);
+        while (true) {
+            var part = await client.Read() ?? throw new IOException("Unexpected EOF during file transfer");
+            if (part.Type == "ping") continue;
+            if (part.Type == "file-end") { var file = receiver.Finish(part.Data); if (file.Name != attachmentOffer.Name || !file.Data.SequenceEqual(attachmentBytes)) throw new Exception("Binary file bytes or name changed"); break; }
+            if (part.Type != "file-chunk") throw new Exception("Unexpected attachment packet");
+            receiver.Append(System.Text.Json.JsonSerializer.Deserialize<AttachmentChunk>(part.Data)!, 2000);
+        }
+        await client.Send(new("action-result", System.Text.Json.JsonSerializer.Serialize(new ActionReceipt(attachmentOffer.Id, "attachment", true, "Verified bytes"))));
+    }
     if (!await client.TrySendFrame(Peer.Encode(new("frame", new string('a', 300000), 1920, 1080)))) throw new Exception("Idle video channel rejected a frame");
     if ((await client.Read()) != new Packet("control", "no")) throw new Exception("Control revocation corrupted");
     client.Dispose(); await receive.WaitAsync(TimeSpan.FromSeconds(15));
     Console.WriteLine("PASS: mutual TLS with pinned teacher and student certificates, code-free Unicode handshake, large frame, control revocation packet, disconnect.");
     Console.WriteLine("PASS: Unicode/multiline teacher message, web link and correlated acknowledgements over TLS (no UI/browser actions).");
+    Console.WriteLine("PASS: complete binary attachment over TLS with Unicode filename, chunks, interleaved heartbeat, SHA-256 and receipt; no files saved.");
 }
 finally { server.Stop(); }
 
@@ -181,3 +204,16 @@ try {
     await Task.WhenAll(clients.Concat(receivers)).WaitAsync(TimeSpan.FromSeconds(30));
     Console.WriteLine("PASS: all 30 concurrent TLS clients received explicit start, complete 300 KB payload and sent session acknowledgement; loopback transport only, no physical classroom performance claim.");
 } finally { classServer.Stop(); }
+void MustReject(Action action) { var rejected = false; try { action(); } catch (IOException) { rejected = true; } if (!rejected) throw new Exception("Invalid attachment accepted"); }
+using (var receiver = new AttachmentReceiver()) {
+    MustReject(() => receiver.Begin(attachmentOffer with { Name = "..\\outside.pdf" }, 0));
+    MustReject(() => receiver.Begin(attachmentOffer with { Length = AttachmentReceiver.MaximumBytes + 1 }, 0));
+    receiver.Begin(attachmentOffer, 1000);
+    if (receiver.Expired(60999) || !receiver.Expired(61000)) throw new Exception("Attachment idle timeout failed");
+    MustReject(() => receiver.Append(new(attachmentOffer.Id, 1, "YQ=="), 2000));
+    MustReject(() => receiver.Finish(attachmentOffer.Id)); receiver.Dispose();
+    receiver.Begin(new(attachmentOffer.Id, "photo.png", 1, new string('0', 64)), 3000);
+    receiver.Append(new(attachmentOffer.Id, 0, "YQ=="), 4000);
+    MustReject(() => receiver.Finish(attachmentOffer.Id));
+}
+Console.WriteLine("PASS: attachment path/size/order/completeness/hash and timeout checks.");

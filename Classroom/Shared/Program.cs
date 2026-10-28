@@ -14,6 +14,20 @@ static class Program
     [STAThread] static void Main(string[] args) {
         ApplicationConfiguration.Initialize();
         if (args.Length == 2 && args[0] == "--design-preview") { Application.Run(new MainWindow(args[1])); return; }
+        if (args.Length == 2 && args[0] == "--attachment-preview") {
+            using var window = new TeacherMessageWindow();
+            window.Shown += async (_, _) => {
+                try {
+                    using var photo = new Bitmap(800, 450); using (var g = Graphics.FromImage(photo)) { g.Clear(Color.FromArgb(33, 95, 150)); using var font = new Font("Segoe UI", 32); g.DrawString("Фото от учителя", font, Brushes.White, 90, 180); }
+                    using var memory = new MemoryStream(); photo.Save(memory, ImageFormat.Png);
+                    window.Receive(new ReceivedAttachment("Пример для проверки.png", memory.ToArray()));
+                    await Task.Delay(300);
+                    using var image = new Bitmap(window.Width, window.Height); window.DrawToBitmap(image, new Rectangle(Point.Empty, image.Size)); image.Save(args[1]);
+                } catch (Exception e) { Console.Error.WriteLine(e); Environment.ExitCode = 1; }
+                finally { Application.ExitThread(); }
+            };
+            Application.Run(window); return;
+        }
         if (args.Length == 1 && args[0] == "--presentation-check") {
             using var check = new MainWindow(presentationCheck: true);
             check.Shown += (_, _) => check.BeginInvoke((Action)(() => check.CheckPresentationWindow()));
@@ -72,6 +86,8 @@ sealed class MainWindow : Form
     readonly ScreenLockState screenLock = new();
     bool lockAll;
     TeacherMessageWindow? messages;
+    readonly AttachmentReceiver attachmentReceiver = new();
+    bool attachmentSending;
     ShutdownCountdown? shutdown;
     readonly Dictionary<(Peer, string), TaskCompletionSource<ActionReceipt>> pendingActions = [];
     ClassroomGrid? overview;
@@ -133,6 +149,15 @@ sealed class MainWindow : Form
             var message = new Button { Text = "Сообщение всем", AutoSize = true };
             var link = new Button { Text = "Открыть ссылку у всех", AutoSize = true };
             toolbar.Controls.AddRange([message, link]);
+            var file = new Button { Text = "Фото или документ", AutoSize = true };
+            toolbar.Controls.Add(file);
+            file.Click += async (_, _) => {
+                if (peers.Count == 0) { Report("Нет подключённых учеников."); return; }
+                using var choose = new OpenFileDialog { Title = "Отправить файл всем ученикам (до 10 МБ)", Filter = "Фото и документы|*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.pdf;*.doc;*.docx;*.xls;*.xlsx;*.ppt;*.pptx;*.txt;*.csv;*.rtf;*.odt;*.ods;*.odp|Все файлы|*.*", CheckFileExists = true, Multiselect = false };
+                if (choose.ShowDialog(this) != DialogResult.OK) return;
+                file.Enabled = false;
+                try { await SendAttachment(choose.FileName); } catch (Exception e) { Report("Отправка файла: " + Explain(e)); } finally { file.Enabled = true; }
+            };
             async Task ComposeAndSend(bool isLink) {
                 if (peers.Count == 0) { Report("Нет подключённых учеников."); return; }
                 message.Enabled = link.Enabled = false;
@@ -157,7 +182,7 @@ sealed class MainWindow : Form
             unblock.Click += async (_, _) => { lockAll = false; foreach (var p in peers.ToArray()) { p.LockRequested = false; await SafeSend(p, new("unlock-screen")); } };
         }
         blocker.EmergencyExit += () => UnlockStudent("Аварийный выход ученика");
-        lockTimer.Tick += (_, _) => { if (blocker.Active && screenLock.Expired(Environment.TickCount64)) UnlockStudent("Истекло ожидание подтверждения от учителя"); };
+        lockTimer.Tick += (_, _) => { if (blocker.Active && screenLock.Expired(Environment.TickCount64)) UnlockStudent("Истекло ожидание подтверждения от учителя"); if (attachmentReceiver.Expired(Environment.TickCount64)) { var id = attachmentReceiver.PendingId!; attachmentReceiver.Dispose(); Report("Передача файла прервана: 60 секунд без новых данных."); if (connection != null) _ = SendAttachmentResult(connection, id, false, "Превышено время ожидания данных файла"); } };
         lockTimer.Start();
         screenArea.Controls.Add(screen); Controls.Add(screenArea); if (IsTeacher) Controls.Add(students); Controls.Add(toolbar); Controls.Add(videoInfo); Controls.Add(status);
         videoQuality.SelectedIndexChanged += (_, _) => { settings.VideoMode = videoQuality.SelectedIndex; timer.Interval = 1000 / VideoProfile.All[videoQuality.SelectedIndex].FramesPerSecond; SaveSettings(); };
@@ -249,6 +274,7 @@ sealed class MainWindow : Form
                     await p.Send(new("capabilities", "message-links-v1"));
                     await p.Send(new("capabilities", "shutdown-v1"));
                     await p.Send(new("capabilities", "broadcast-status-v1"));
+                    await p.Send(new("capabilities", "attachments-v1"));
                     Report("Подключено к " + settings.Trusted[expected] + ". Экран виден учителю. " + (control.Checked ? "Управление разрешено." : "Управление выключено."));
                     _ = ReadLoop(p);
                 } catch { tcp.Dispose(); throw; }
@@ -283,6 +309,8 @@ sealed class MainWindow : Form
         try { while (!closing) {
             var m = await p.Read(); if (m == null) { Report(p.Name + ": другая сторона закрыла соединение. Поиск продолжится автоматически."); break; }
             switch (m.Type) {
+                case "file-begin": case "file-chunk": case "file-end": case "file-abort":
+                    if (!IsTeacher && connection == p && !paused) await ReceiveAttachment(p, m); break;
                 case "teacher-message": case "open-url": case "shutdown-student": case "cancel-shutdown":
                     if (!IsTeacher && connection == p && !paused) await ReceiveClassAction(p, m);
                     break;
@@ -292,6 +320,7 @@ sealed class MainWindow : Form
                         catch (System.Text.Json.JsonException) { Report(p.Name + ": некорректное подтверждение команды."); }
                     } break;
                 case "capabilities":
+                    if (IsTeacher && m.Data == "attachments-v1") p.SupportsAttachments = true;
                     if (IsTeacher && m.Data == "broadcast-status-v1") { p.SupportsBroadcastStatus = true; Report(p.Name + ": Student с подтверждением демонстрации подключён"); if (broadcast.Checked) await SafeSend(p, new("broadcast-start", broadcastSession)); }
                     if (IsTeacher && m.Data == "shutdown-v1") p.SupportsShutdown = true;
                     if (IsTeacher && m.Data == "message-links-v1") p.SupportsClassActions = true;
@@ -344,10 +373,82 @@ sealed class MainWindow : Form
             foreach (var wait in pendingActions.Where(entry => entry.Key.Item1 == p).Select(entry => entry.Value).ToArray()) wait.TrySetException(new IOException("Соединение с учеником закрыто."));
             p.Dispose(); peers.Remove(p); students.Items.Remove(p);
             overview?.Remove(p); if (IsTeacher && (peers.Count == 0 || students.SelectedItem == null)) ShowOverview();
-            if (connection == p) { StopStudentBroadcast(); shutdown?.Cancel("Связь с учителем потеряна"); connection = null; screenLock.Release(); blocker.Dispose(); control.Checked = false; ReleaseKeys(); screen.Image?.Dispose(); screen.Image = null; }
+            if (connection == p) { attachmentReceiver.Dispose(); StopStudentBroadcast(); shutdown?.Cancel("Связь с учителем потеряна"); connection = null; screenLock.Release(); blocker.Dispose(); control.Checked = false; ReleaseKeys(); screen.Image?.Dispose(); screen.Image = null; }
         }
     }
     async Task SafeSend(Peer p, Packet m) { try { await p.Send(m); } catch { p.Dispose(); } }
+    Task SendAttachmentResult(Peer peer, string id, bool success, string detail) => SafeSend(peer, new("action-result", System.Text.Json.JsonSerializer.Serialize(new ActionReceipt(id, "attachment", success, detail))));
+    async Task ReceiveAttachment(Peer peer, Packet packet)
+    {
+        var id = attachmentReceiver.PendingId;
+        try {
+            if (packet.Type == "file-begin") {
+                var offer = System.Text.Json.JsonSerializer.Deserialize<AttachmentOffer>(packet.Data) ?? throw new IOException("Пустые данные файла."); id = offer.Id;
+                attachmentReceiver.Begin(offer, Environment.TickCount64);
+                Report($"Получение файла: {offer.Name} · {offer.Length / 1024d:F1} КБ");
+            } else if (packet.Type == "file-chunk") {
+                var chunk = System.Text.Json.JsonSerializer.Deserialize<AttachmentChunk>(packet.Data) ?? throw new IOException("Пустая часть файла.");
+                attachmentReceiver.Append(chunk, Environment.TickCount64);
+            } else if (packet.Type == "file-end") {
+                id = packet.Data; var attachment = attachmentReceiver.Finish(id);
+                UnlockStudent("Учитель отправил файл"); messages ??= new TeacherMessageWindow(); messages.Receive(attachment);
+                await SendAttachmentResult(peer, id, true, "Файл получен, SHA-256 проверена, окно открыто");
+                Report("Получен файл: " + attachment.Name);
+            } else if (packet.Type == "file-abort" && packet.Data == attachmentReceiver.PendingId) attachmentReceiver.Dispose();
+        } catch (Exception e) {
+            attachmentReceiver.Dispose(); Report("Получение файла: " + Explain(e));
+            if (id != null && Guid.TryParse(id, out _)) await SendAttachmentResult(peer, id, false, Explain(e));
+        }
+    }
+    async Task SendAttachment(string path)
+    {
+        byte[] data;
+        using (var source = File.OpenRead(path)) {
+            if (source.Length < 1 || source.Length > AttachmentReceiver.MaximumBytes) throw new IOException("Размер файла должен быть от 1 байта до 10 МБ.");
+            data = new byte[(int)source.Length]; await source.ReadExactlyAsync(data);
+            if (source.ReadByte() != -1) throw new IOException("Файл изменился во время чтения. Повторите выбор файла.");
+        }
+        var name = Path.GetFileName(path); if (!AttachmentReceiver.ValidName(name)) throw new IOException("Недопустимое имя файла.");
+        var targets = peers.ToArray(); var id = Guid.NewGuid().ToString();
+        var offer = new AttachmentOffer(id, name, data.Length, Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(data)));
+        var begin = Peer.Encode(new("file-begin", System.Text.Json.JsonSerializer.Serialize(offer)));
+        var end = Peer.Encode(new("file-end", id));
+        attachmentSending = true;
+        try {
+            var chunks = await Task.Run(() => {
+                var list = new List<byte[]>();
+                for (var offset = 0; offset < data.Length; offset += AttachmentReceiver.ChunkBytes) {
+                    var chunk = new AttachmentChunk(id, offset, Convert.ToBase64String(data, offset, Math.Min(AttachmentReceiver.ChunkBytes, data.Length - offset)));
+                    list.Add(Peer.Encode(new("file-chunk", System.Text.Json.JsonSerializer.Serialize(chunk))));
+                }
+                return list;
+            });
+            lockAll = false; foreach (var p in targets) p.LockRequested = false;
+            await Task.WhenAll(targets.Where(p => p.SupportsScreenLock).Select(p => SafeSend(p, new("unlock-screen"))));
+            Report($"Отправка файла {name} · {data.Length / 1024d:F1} КБ · компьютеров {targets.Length}");
+            async Task<bool> Deliver(Peer peer) {
+                if (!peer.SupportsAttachments) { Report(peer.Name + ": обновите Student для получения файлов."); return false; }
+                var done = new TaskCompletionSource<ActionReceipt>(TaskCreationOptions.RunContinuationsAsynchronously);
+                pendingActions[(peer, id)] = done; peer.AttachmentSending = true;
+                var deadline = Environment.TickCount64 + 120000;
+                try {
+                    await peer.SendEncoded(begin);
+                    foreach (var chunk in chunks) {
+                        if (Environment.TickCount64 >= deadline || !peers.Contains(peer)) throw new IOException("Передача файла прервана или заняла больше 2 минут.");
+                        if (done.Task.IsCompleted) { var early = await done.Task; throw new IOException(early.Detail); }
+                        await peer.SendEncoded(chunk);
+                    }
+                    await peer.SendEncoded(end);
+                    var receipt = await done.Task.WaitAsync(TimeSpan.FromSeconds(20));
+                    if (receipt.Kind != "attachment") throw new IOException("Некорректное подтверждение файла.");
+                    Report(peer.Name + ": " + receipt.Detail); return receipt.Success;
+                } catch (Exception e) { Report(peer.Name + ": файл не подтверждён — " + Explain(e)); await SafeSend(peer, new("file-abort", id)); return false; }
+                finally { peer.AttachmentSending = false; pendingActions.Remove((peer, id)); }
+            }
+            var results = await Task.WhenAll(targets.Select(Deliver));
+            Report($"Файл {name}: получение подтверждено {results.Count(x => x)} из {targets.Length}. Сохранение учениками выполняется отдельно.");
+        } finally { attachmentSending = false; }
+    }
     async Task ReceiveClassAction(Peer p, Packet packet)
     {
         ClassAction? command = null;
@@ -409,7 +510,7 @@ sealed class MainWindow : Form
         if (targets.Length == 0) return;
         sending = true;
         try {
-            if ((IsTeacher && !broadcast.Checked) || (!IsTeacher && studentBroadcastActive) || (IsTeacher && Environment.TickCount64 < nextBroadcastFrame)) {
+            if ((IsTeacher && (!broadcast.Checked || attachmentSending)) || (!IsTeacher && studentBroadcastActive) || (IsTeacher && Environment.TickCount64 < nextBroadcastFrame)) {
                 if (Environment.TickCount64 - lastHeartbeat >= 2000) { lastHeartbeat = Environment.TickCount64; var heartbeat = Peer.Encode(new("ping")); foreach (var p in targets) _ = SendHeartbeat(p, heartbeat); }
             }
             else {
@@ -430,6 +531,7 @@ sealed class MainWindow : Form
     async Task SendHeartbeat(Peer p, byte[] bytes) { try { await p.TrySendFrame(bytes); } catch (Exception e) { if (!closing && !paused) Report("Связь → " + p.Name + ": " + Explain(e)); p.Dispose(); } }
     void Disconnect()
     {
+        attachmentReceiver.Dispose();
         StopStudentBroadcast();
         incomingBroadcastSession = ""; acknowledgedBroadcastSession = "";
         shutdown?.Cancel("Соединение закрыто");

@@ -50,8 +50,10 @@ static class Design
             quality.Width = 270; quality.DropDownWidth = 440; quality.FlatStyle = FlatStyle.Flat; quality.Margin = new Padding(0, 6, 0, 0);
             Card("Демонстрация", 300, broadcast, quality);
             var message = Find("Сообщение всем"); var link = Find("Открыть ссылку у всех");
+            var attachment = Find("Фото или документ");
             Shorten("Сообщение всем", "Сообщение всем", 175); Shorten("Открыть ссылку у всех", "Открыть ссылку", 175);
-            Card("Задания классу", 205, message, link);
+            Shorten("Фото или документ", "Фото или документ", 175);
+            Card("Задания классу", 205, message, link, attachment).Height = 170;
             var block = Find("Заблокировать экраны"); var unblock = Find("Разблокировать все");
             Shorten("Заблокировать экраны", "Заблокировать", 170); Shorten("Разблокировать все", "Разблокировать", 170);
             Card("Внимание класса", 200, block, unblock);
@@ -63,7 +65,8 @@ static class Design
             void Reflow() {
                 var available = tools.ClientSize.Width - tools.Padding.Horizontal; var row = 0; var rows = 1;
                 foreach (Control card in tools.Controls) { var width = card.Width + card.Margin.Horizontal; if (row > 0 && row + width > available) { rows++; row = 0; } row += width; }
-                var height = tools.Padding.Vertical + rows * 128; if (tools.Height != height) tools.Height = height;
+                var rowHeight = tools.Controls.Cast<Control>().Max(c => c.Height + c.Margin.Vertical);
+                var height = tools.Padding.Vertical + rows * rowHeight; if (tools.Height != height) tools.Height = height;
             }
             tools.SizeChanged += (_, _) => Reflow(); Reflow();
             var manage = Find("Управлять выбранным");

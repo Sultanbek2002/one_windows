@@ -17,14 +17,16 @@ sealed class Peer : IDisposable
     public bool SupportsClassActions { get; set; }
     public bool SupportsShutdown { get; set; }
     public bool SupportsBroadcastStatus { get; set; }
+    public bool SupportsAttachments { get; set; }
+    public bool AttachmentSending { get; set; }
     public bool BroadcastShown { get; set; }
     public bool LockRequested { get; set; }
     public string LockToken { get; set; } = "";
     public Peer(TcpClient c, SslStream s) { client = c; client.NoDelay = true; stream = s; reader = new(s, Encoding.UTF8, false, 65536, true); }
     public static byte[] Encode(Packet p) => Encoding.UTF8.GetBytes(JsonSerializer.Serialize(p) + "\n");
-    public async Task Send(Packet p)
+    public Task Send(Packet p) => SendEncoded(Encode(p));
+    public async Task SendEncoded(byte[] bytes)
     {
-        var bytes = Encode(p);
         await gate.WaitAsync();
         try { await Write(bytes); }
         finally { gate.Release(); }
@@ -32,6 +34,7 @@ sealed class Peer : IDisposable
     // One in-flight frame per peer. Slow recipients skip new frames rather than queue them.
     public async Task<bool> TrySendFrame(byte[] bytes)
     {
+        if (AttachmentSending) return false;
         if (!await gate.WaitAsync(0)) return false;
         try { await Write(bytes); return true; }
         finally { gate.Release(); }
