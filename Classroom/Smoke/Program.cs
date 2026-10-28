@@ -146,3 +146,38 @@ Console.WriteLine("PASS: responsive student grid uses one to four columns withou
 if (StartupRegistration.Command(@"C:\School Apps\Student.exe") != "\"C:\\School Apps\\Student.exe\"") throw new Exception("Startup executable path was not quoted");
 if (new Settings().StartupConfiguredVersion != 0) throw new Exception("New or old settings must enroll automatic startup once");
 Console.WriteLine("PASS: startup path quoting and enrollment defaults; registry was not modified and reboot was not tested.");
+var singleInterval = BroadcastPacing.Interval(200000, 1, 15);
+var classInterval = BroadcastPacing.Interval(200000, 30, 15);
+if (classInterval <= singleInterval || classInterval < 1200 || singleInterval < 67) throw new Exception("Class broadcast does not account for aggregate fan-out and requested frame rate");
+if (BroadcastPacing.Interval(400000, 30, 15) < classInterval * 2) throw new Exception("Larger frames do not increase broadcast pacing");
+Console.WriteLine("PASS: broadcast pacing accounts for all 30 recipients and complete wire-frame size; no 10-recipient cap.");
+var classServer = new TcpListener(IPAddress.Loopback, 0); classServer.Start();
+try {
+    var session = Guid.NewGuid().ToString(); var classPort = ((IPEndPoint)classServer.LocalEndpoint).Port;
+    var encodedFrame = Peer.Encode(new("frame", new string('z', 300000), 1920, 1080));
+    var clients = Enumerable.Range(0, 30).Select(async _ => {
+        using var tcp = new TcpClient(); await tcp.ConnectAsync(IPAddress.Loopback, classPort);
+        using var tls = new SslStream(tcp.GetStream(), false, (_, c, _, _) => c?.GetCertHashString(HashAlgorithmName.SHA256) == fingerprint);
+        await tls.AuthenticateAsClientAsync(new SslClientAuthenticationOptions { TargetHost = "Classroom", ClientCertificates = new X509CertificateCollection { studentCert } });
+        using var peer = new Peer(tcp, tls);
+        if (await peer.Read() != new Packet("broadcast-start", session)) throw new Exception("Missing explicit broadcast start");
+        var frame = await peer.Read(); if (frame?.Type != "frame" || frame.Data.Length != 300000) throw new Exception("Incomplete class broadcast frame");
+        await peer.Send(new("broadcast-shown", session));
+    }).ToArray();
+    var receivers = new List<Task>();
+    for (var i = 0; i < 30; i++) {
+        var tcp = await classServer.AcceptTcpClientAsync();
+        receivers.Add(Task.Run(async () => {
+            using (tcp) {
+                using var tls = new SslStream(tcp.GetStream(), false, (_, c, _, _) => c?.GetCertHashString(HashAlgorithmName.SHA256) == studentCert.GetCertHashString(HashAlgorithmName.SHA256));
+                await tls.AuthenticateAsServerAsync(new SslServerAuthenticationOptions { ServerCertificate = cert, ClientCertificateRequired = true });
+                using var peer = new Peer(tcp, tls);
+                await peer.Send(new("broadcast-start", session));
+                if (!await peer.TrySendFrame(encodedFrame)) throw new Exception("Idle class connection skipped its first frame");
+                if (await peer.Read() != new Packet("broadcast-shown", session)) throw new Exception("Missing class broadcast acknowledgement");
+            }
+        }));
+    }
+    await Task.WhenAll(clients.Concat(receivers)).WaitAsync(TimeSpan.FromSeconds(30));
+    Console.WriteLine("PASS: all 30 concurrent TLS clients received explicit start, complete 300 KB payload and sent session acknowledgement; loopback transport only, no physical classroom performance claim.");
+} finally { classServer.Stop(); }

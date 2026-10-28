@@ -59,6 +59,8 @@ sealed class MainWindow : Form
     readonly System.Diagnostics.Stopwatch videoClock = System.Diagnostics.Stopwatch.StartNew();
     int receivedFrames;
     long lastHeartbeat;
+    long nextBroadcastFrame;
+    int broadcastSendOffset;
     TcpListener? listener;
     X509Certificate2? certificate;
     Peer? connection;
@@ -75,6 +77,7 @@ sealed class MainWindow : Form
     ClassroomGrid? overview;
     bool expandedStudent;
     bool studentBroadcastActive;
+    string broadcastSession = "", incomingBroadcastSession = "", acknowledgedBroadcastSession = "";
     Action? beginStudentBroadcast, endStudentBroadcast;
     readonly CheckBox autoControl = new() { Text = "Всегда разрешать управление доверенному учителю", AutoSize = true };
     readonly Button startup = new() { Text = "Включить автозапуск", AutoSize = true };
@@ -167,7 +170,14 @@ sealed class MainWindow : Form
         details.Click += (_, _) => MessageBox.Show(this, "Имя: " + Environment.MachineName + "\nСертификат: " + certificate?.GetCertHashString(HashAlgorithmName.SHA256) + "\nЖурнал: " + Path.Combine(Settings.DirectoryPath, Role + ".log"), "Сведения для первого подтверждения");
         forget.Click += (_, _) => { if (MessageBox.Show(this, "Удалить доверенные компьютеры? При следующем подключении потребуется новое подтверждение.", "Сброс доверия", MessageBoxButtons.YesNo) != DialogResult.Yes) return; paused = true; Disconnect(); settings.Trusted.Clear(); declined.Clear(); SaveSettings(); Report("Доверие сброшено. Нажмите «Найти снова»."); };
         control.CheckedChanged += async (_, _) => { if (!control.Checked) { shutdown?.Cancel("Управление отключено"); ReleaseKeys(); UnlockStudent("Управление отключено"); } if (connection != null) await SafeSend(connection, new("control", control.Checked ? "yes" : "no")); };
-        broadcast.CheckedChanged += async (_, _) => { if (!broadcast.Checked) foreach (var p in peers.ToArray()) await SafeSend(p, new("broadcast-stop")); };
+        broadcast.CheckedChanged += async (_, _) => {
+            var targets = peers.ToArray();
+            if (broadcast.Checked) {
+                broadcastSession = Guid.NewGuid().ToString(); nextBroadcastFrame = 0; foreach (var p in targets) p.BroadcastShown = false;
+                await Task.WhenAll(targets.Select(p => SafeSend(p, new("broadcast-start", broadcastSession))));
+                Report($"Демонстрация запущена для {targets.Length}. Подтверждение показа доступно после обновления Student.");
+            } else { await Task.WhenAll(targets.Select(p => SafeSend(p, new("broadcast-stop")))); broadcastSession = ""; }
+        };
         students.SelectedIndexChanged += async (_, _) => { screen.Image?.Dispose(); screen.Image = null; foreach (var p in peers.Where(p => p.Control).ToArray()) await SafeSend(p, new("release-keys")); };
         screen.LostFocus += async (_, _) => { if (IsTeacher) foreach (var p in peers.Where(p => p.Control).ToArray()) await SafeSend(p, new("release-keys")); };
         screen.MouseDown += async (_, e) => {
@@ -238,6 +248,7 @@ sealed class MainWindow : Form
                     await p.Send(new("capabilities", "screen-lock-v1"));
                     await p.Send(new("capabilities", "message-links-v1"));
                     await p.Send(new("capabilities", "shutdown-v1"));
+                    await p.Send(new("capabilities", "broadcast-status-v1"));
                     Report("Подключено к " + settings.Trusted[expected] + ". Экран виден учителю. " + (control.Checked ? "Управление разрешено." : "Управление выключено."));
                     _ = ReadLoop(p);
                 } catch { tcp.Dispose(); throw; }
@@ -281,6 +292,7 @@ sealed class MainWindow : Form
                         catch (System.Text.Json.JsonException) { Report(p.Name + ": некорректное подтверждение команды."); }
                     } break;
                 case "capabilities":
+                    if (IsTeacher && m.Data == "broadcast-status-v1") { p.SupportsBroadcastStatus = true; Report(p.Name + ": Student с подтверждением демонстрации подключён"); if (broadcast.Checked) await SafeSend(p, new("broadcast-start", broadcastSession)); }
                     if (IsTeacher && m.Data == "shutdown-v1") p.SupportsShutdown = true;
                     if (IsTeacher && m.Data == "message-links-v1") p.SupportsClassActions = true;
                     if (IsTeacher && m.Data == "screen-lock-v1") { p.SupportsScreenLock = true; if (lockAll) { p.LockRequested = true; p.LockToken = Guid.NewGuid().ToString(); await SafeSend(p, new("lock-screen", p.LockToken)); } } break;
@@ -305,10 +317,15 @@ sealed class MainWindow : Form
                         }
                         var old = screen.Image; screen.Image = image; old?.Dispose();
                         ShowReceivedPresentation();
+                        if (!IsTeacher && incomingBroadcastSession.Length > 0 && acknowledgedBroadcastSession != incomingBroadcastSession) { acknowledgedBroadcastSession = incomingBroadcastSession; await SafeSend(p, new("broadcast-shown", incomingBroadcastSession, image.Width, image.Height)); }
                         receivedFrames++;
                         if (videoClock.ElapsedMilliseconds >= 1000) { videoInfo.Text = $"Приём: {image.Width} × {image.Height} · {receivedFrames * 1000d / videoClock.ElapsedMilliseconds:F1} кадров/с"; receivedFrames = 0; videoClock.Restart(); }
                     } break;
-                case "broadcast-stop": if (!IsTeacher && connection == p) StopStudentBroadcast(); screen.Image?.Dispose(); screen.Image = null; break;
+                case "broadcast-start":
+                    if (!IsTeacher && connection == p && Guid.TryParse(m.Data, out _)) { incomingBroadcastSession = m.Data; ShowReceivedPresentation(); await SafeSend(p, new("broadcast-ready", m.Data)); } break;
+                case "broadcast-ready": if (IsTeacher && broadcast.Checked && m.Data == broadcastSession) Report(p.Name + ": окно демонстрации открыто, ожидание первого кадра"); break;
+                case "broadcast-shown": if (IsTeacher && broadcast.Checked && m.Data == broadcastSession) { p.BroadcastShown = true; Report($"{p.Name}: первый кадр демонстрации показан ({m.X} × {m.Y})"); } break;
+                case "broadcast-stop": if (!IsTeacher && connection == p) { StopStudentBroadcast(); incomingBroadcastSession = ""; acknowledgedBroadcastSession = ""; } screen.Image?.Dispose(); screen.Image = null; break;
                 case "control-request":
                     if (!IsTeacher && !control.Checked) { Report("Доступ отключён администратором. Настройки — через ⋯."); await SafeSend(p, new("control", "no")); }
                     break;
@@ -392,24 +409,29 @@ sealed class MainWindow : Form
         if (targets.Length == 0) return;
         sending = true;
         try {
-            if (IsTeacher && !broadcast.Checked) {
-                if (Environment.TickCount64 - lastHeartbeat >= 2000) { lastHeartbeat = Environment.TickCount64; await Task.WhenAll(targets.Select(p => SafeSend(p, new("ping")))); }
+            if ((IsTeacher && !broadcast.Checked) || (!IsTeacher && studentBroadcastActive) || (IsTeacher && Environment.TickCount64 < nextBroadcastFrame)) {
+                if (Environment.TickCount64 - lastHeartbeat >= 2000) { lastHeartbeat = Environment.TickCount64; var heartbeat = Peer.Encode(new("ping")); foreach (var p in targets) _ = SendHeartbeat(p, heartbeat); }
             }
             else {
                 var bounds = Screen.PrimaryScreen!.Bounds;
                 var profile = IsTeacher ? VideoProfile.All[videoQuality.SelectedIndex] : new VideoProfile("Просмотр ученика", 1024, 2, 80);
                 var bytes = await Task.Run(() => ScreenCapture.Capture(bounds, profile));
                 if (closing || paused || (IsTeacher && !broadcast.Checked)) return;
-                foreach (var p in targets) _ = SendVideo(p, bytes);
-                if (IsTeacher) videoInfo.Text = $"Демонстрация: {profile.Name} · кадр {bytes.Length / 1024} КБ · получателей {targets.Length}";
+                var interval = IsTeacher ? BroadcastPacing.Interval(bytes.Length, targets.Length, profile.FramesPerSecond) : 700;
+                if (IsTeacher) nextBroadcastFrame = Environment.TickCount64 + interval;
+                var offset = IsTeacher ? (int)((uint)broadcastSendOffset++ % (uint)targets.Length) : 0;
+                for (var i = 0; i < targets.Length; i++) _ = SendVideo(targets[(i + offset) % targets.Length], bytes);
+                if (IsTeacher) videoInfo.Text = $"Кадр {bytes.Length / 1024} КБ · интервал {interval} мс · показ подтверждён {targets.Count(p => p.BroadcastShown)}/{targets.Length} · старый Student: {targets.Count(p => !p.SupportsBroadcastStatus)}";
             }
         } catch (Exception e) { status.Text = "Захват экрана: " + e.Message; }
         finally { sending = false; }
     }
-    async Task SendVideo(Peer p, byte[] bytes) { try { await p.TrySendFrame(bytes); } catch (Exception e) { if (!closing && !paused) Report("Передача видео: " + Explain(e)); p.Dispose(); } }
+    async Task SendVideo(Peer p, byte[] bytes) { try { await p.TrySendFrame(bytes); } catch (Exception e) { if (!closing && !paused) Report("Передача видео → " + p.Name + ": " + Explain(e)); p.Dispose(); } }
+    async Task SendHeartbeat(Peer p, byte[] bytes) { try { await p.TrySendFrame(bytes); } catch (Exception e) { if (!closing && !paused) Report("Связь → " + p.Name + ": " + Explain(e)); p.Dispose(); } }
     void Disconnect()
     {
         StopStudentBroadcast();
+        incomingBroadcastSession = ""; acknowledgedBroadcastSession = "";
         shutdown?.Cancel("Соединение закрыто");
         screenLock.Release(); blocker.Dispose(); lockAll = false;
         listener?.Stop(); listener = null;
